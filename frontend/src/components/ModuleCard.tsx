@@ -76,8 +76,8 @@ const MODULE_HELP: Record<string, { what: string; howToFix: string }> = {
     howToFix: 'Ensure your host or a redirect plugin forces HTTPS site-wide with a single 301 redirect, not a chain of multiple hops.',
   },
   contact_forms: {
-    what: 'Checks that a real, correctly-built contact form exists on the homepage and the Contact page, and (if a Postmark server token is configured) whether the site has sent any transactional email recently — without ever submitting a test message itself.',
-    howToFix: 'A missing form means adding one with your form builder (Elementor, Contact Form 7, WPForms, etc.) to that page. No recent Postmark activity is inconclusive on its own — configure a Postmark server token in Edit Site to get a real signal, and verify a real submission arrives in your inbox at least once.',
+    what: 'Checks that a real, correctly-built contact form exists on the homepage and the Contact page — without ever submitting a test message itself.',
+    howToFix: 'A missing form means adding one with your form builder (Elementor, Contact Form 7, WPForms, etc.) to that page. An incomplete form (missing an email field, message field, or submit button) usually means a plugin update broke the form markup — check it by hand.',
   },
   tracking_scripts: {
     what: 'Inventories every analytics, advertising pixel, call-tracking, heatmap, and chat-widget script loaded on the site — Google Analytics/Tag Manager, Meta Pixel, Google Ads, CallRail, Hotjar, etc. — and flags missing tracking, deprecated Universal Analytics, likely duplicate installs, and tracking present on some scanned pages but not others.',

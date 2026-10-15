@@ -23,3 +23,4 @@ requests==2.32.3
 tenacity==9.0.0
 rich==13.9.1
 advertools>=0.14.0
+fastapi-mcp==0.4.0

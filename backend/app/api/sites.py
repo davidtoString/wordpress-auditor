@@ -60,7 +60,6 @@ class SiteCreate(BaseModel):
     notify_email: Optional[str] = None
     wp_username: Optional[str] = None
     wp_app_password: Optional[str] = None
-    postmark_server_token: Optional[str] = None
     nap_name: Optional[str] = None
     nap_address: Optional[str] = None
     nap_phone: Optional[str] = None
@@ -74,7 +73,6 @@ class SiteUpdate(BaseModel):
     notify_email: Optional[str] = None
     wp_username: Optional[str] = None
     wp_app_password: Optional[str] = None
-    postmark_server_token: Optional[str] = None
     nap_name: Optional[str] = None
     nap_address: Optional[str] = None
     nap_phone: Optional[str] = None
@@ -91,7 +89,6 @@ class SiteResponse(BaseModel):
     notify_email: Optional[str]
     wp_username: Optional[str]
     wp_app_password_configured: bool = False
-    postmark_token_configured: bool = False
     nap_name: Optional[str]
     nap_address: Optional[str]
     nap_phone: Optional[str]
@@ -142,7 +139,6 @@ def list_sites(
             "notify_email": site.notify_email,
             "wp_username": site.wp_username,
             "wp_app_password_configured": bool(site.wp_app_password),
-            "postmark_token_configured": bool(site.postmark_server_token),
             "nap_name": site.nap_name,
             "nap_address": site.nap_address,
             "nap_phone": site.nap_phone,
@@ -182,7 +178,6 @@ async def create_site(
         notify_email=payload.notify_email,
         wp_username=payload.wp_username,
         wp_app_password=payload.wp_app_password,
-        postmark_server_token=payload.postmark_server_token,
         nap_name=payload.nap_name,
         nap_address=payload.nap_address,
         nap_phone=payload.nap_phone,
@@ -205,7 +200,6 @@ async def create_site(
         notify_email=site.notify_email,
         wp_username=site.wp_username,
         wp_app_password_configured=bool(site.wp_app_password),
-        postmark_token_configured=bool(site.postmark_server_token),
         nap_name=site.nap_name,
         nap_address=site.nap_address,
         nap_phone=site.nap_phone,
@@ -241,7 +235,6 @@ def get_site(
         notify_email=site.notify_email,
         wp_username=site.wp_username,
         wp_app_password_configured=bool(site.wp_app_password),
-        postmark_token_configured=bool(site.postmark_server_token),
         nap_name=site.nap_name,
         nap_address=site.nap_address,
         nap_phone=site.nap_phone,
@@ -278,8 +271,6 @@ async def update_site(
         site.wp_username = payload.wp_username
     if payload.wp_app_password is not None:
         site.wp_app_password = payload.wp_app_password
-    if payload.postmark_server_token is not None:
-        site.postmark_server_token = payload.postmark_server_token
     if payload.nap_name is not None:
         site.nap_name = payload.nap_name
     if payload.nap_address is not None:
@@ -304,7 +295,6 @@ async def update_site(
         notify_email=site.notify_email,
         wp_username=site.wp_username,
         wp_app_password_configured=bool(site.wp_app_password),
-        postmark_token_configured=bool(site.postmark_server_token),
         nap_name=site.nap_name,
         nap_address=site.nap_address,
         nap_phone=site.nap_phone,
@@ -359,55 +349,6 @@ async def test_wp_connection(
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail=f"Unexpected response from the site's REST API (HTTP {resp.status_code}).",
-    )
-
-
-@router.post("/{site_id}/test-postmark-connection")
-async def test_postmark_connection(
-    site_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Verify the saved Postmark server token is valid, used by the contact_forms audit module
-    to check for recent outbound email activity as a signal the form-to-email pipeline works."""
-    site = db.query(Site).filter(Site.id == site_id).first()
-    if not site:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
-    if not site.postmark_server_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No Postmark server token configured for this site",
-        )
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                "https://api.postmarkapp.com/server",
-                headers={
-                    "X-Postmark-Server-Token": site.postmark_server_token,
-                    "Accept": "application/json",
-                },
-            )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Could not reach Postmark: {exc}",
-        )
-
-    if resp.status_code == 200:
-        data = resp.json()
-        return {
-            "success": True,
-            "message": f"Connected successfully to Postmark server '{data.get('Name', 'unknown')}'.",
-        }
-    if resp.status_code == 401:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Postmark authentication failed — the server token is incorrect.",
-        )
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=f"Unexpected response from Postmark (HTTP {resp.status_code}).",
     )
 
 

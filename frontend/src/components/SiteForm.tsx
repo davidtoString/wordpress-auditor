@@ -63,24 +63,6 @@ export const SiteForm: React.FC<SiteFormProps> = ({
     }
   }
 
-  const [postmarkToken, setPostmarkToken] = useState(initialValues?.postmark_server_token || '')
-  const [postmarkTestStatus, setPostmarkTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
-  const [postmarkTestMessage, setPostmarkTestMessage] = useState('')
-
-  const handleTestPostmarkConnection = async () => {
-    if (!initialValues?.id) return
-    setPostmarkTestStatus('testing')
-    setPostmarkTestMessage('')
-    try {
-      const result = await sitesApi.testPostmarkConnection(initialValues.id)
-      setPostmarkTestStatus(result.success ? 'success' : 'error')
-      setPostmarkTestMessage(result.message)
-    } catch (err: any) {
-      setPostmarkTestStatus('error')
-      setPostmarkTestMessage(err.response?.data?.detail || 'Connection test failed.')
-    }
-  }
-
   const [showNapConfig, setShowNapConfig] = useState(
     !!initialValues?.nap_name || !!initialValues?.nap_address || !!initialValues?.nap_phone
   )
@@ -111,7 +93,6 @@ export const SiteForm: React.FC<SiteFormProps> = ({
       is_active: isActive,
       wp_username: wpUsername.trim() || null,
       wp_app_password: wpAppPassword.trim() || null,
-      postmark_server_token: postmarkToken.trim() || null,
       nap_name: napName.trim() || null,
       nap_address: napAddress.trim() || null,
       nap_phone: napPhone.trim() || null,
@@ -290,7 +271,7 @@ export const SiteForm: React.FC<SiteFormProps> = ({
                   Integration Credentials (Optional)
                 </h3>
                 <p className="text-xs text-slate-400">
-                  WordPress REST API for deep diagnostics, and Postmark for contact-form delivery checks.
+                  WordPress REST API credentials for deep diagnostics (plugin list, debug output across pages).
                 </p>
               </div>
             </div>
@@ -390,75 +371,6 @@ export const SiteForm: React.FC<SiteFormProps> = ({
                   )}
                 </div>
               )}
-
-              <div className="pt-2 border-t border-slate-100 dark:border-slate-700/60 space-y-4">
-                <div>
-                  <label
-                    htmlFor="postmarkToken"
-                    className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5"
-                  >
-                    <span>Postmark Server Token</span>
-                    {initialValues?.postmark_token_configured && (
-                      <span className="inline-flex items-center gap-1 normal-case font-medium text-emerald-600 dark:text-emerald-400">
-                        <Check className="w-3 h-3" />
-                        Currently saved
-                      </span>
-                    )}
-                  </label>
-                  <input
-                    id="postmarkToken"
-                    type="password"
-                    value={postmarkToken}
-                    onChange={(e) => setPostmarkToken(e.target.value)}
-                    placeholder={
-                      initialValues?.postmark_token_configured
-                        ? 'Leave blank to keep the saved token'
-                        : 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
-                    }
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
-                  />
-                  <p className="text-[11px] text-slate-400 mt-1.5">
-                    Used by the Contact Forms audit module to check for recent outbound email
-                    activity — the clearest available signal the form-to-email pipeline works,
-                    without submitting a real test message to the site.
-                  </p>
-                </div>
-
-                {initialValues?.id && (
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={handleTestPostmarkConnection}
-                        disabled={postmarkTestStatus === 'testing' || !initialValues?.postmark_token_configured}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-700/70 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors disabled:opacity-50"
-                      >
-                        {postmarkTestStatus === 'testing' ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <PlugZap className="w-3.5 h-3.5" />
-                        )}
-                        Test Connection
-                      </button>
-                      <span className="text-[11px] text-slate-400">
-                        Tests the currently saved token — save first if you just changed it above.
-                      </span>
-                    </div>
-                    {postmarkTestStatus === 'success' && (
-                      <div className="flex items-start gap-1.5 text-xs text-emerald-700 dark:text-emerald-400">
-                        <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
-                        <span>{postmarkTestMessage}</span>
-                      </div>
-                    )}
-                    {postmarkTestStatus === 'error' && (
-                      <div className="flex items-start gap-1.5 text-xs text-rose-700 dark:text-rose-400">
-                        <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
-                        <span>{postmarkTestMessage}</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
             </div>
           )}
         </div>

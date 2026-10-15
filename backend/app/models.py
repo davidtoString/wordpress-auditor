@@ -70,7 +70,6 @@ class Site(Base):
     notify_email = sa.Column(sa.String(255), nullable=True)  # override alert email for this site
     wp_username = sa.Column(sa.String(255), nullable=True)
     wp_app_password = sa.Column(sa.String(255), nullable=True)
-    postmark_server_token = sa.Column(sa.String(255), nullable=True)  # for contact-form delivery checks
     nap_name = sa.Column(sa.String(255), nullable=True)
     nap_address = sa.Column(sa.Text, nullable=True)
     nap_phone = sa.Column(sa.String(100), nullable=True)

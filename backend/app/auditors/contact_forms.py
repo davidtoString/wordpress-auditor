@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -25,14 +24,10 @@ _FORM_PLUGIN_SIGNATURES: dict[str, list[str]] = {
 
 _CONTACT_PATH_CANDIDATES = ["/contact", "/contact-us", "/contactus", "/get-in-touch"]
 
-POSTMARK_LOOKBACK_DAYS = 30
-
 
 class ContactFormsAuditor(BaseAuditor):
     """Passive check: does a real-looking contact form exist on the homepage and the site's
-    Contact page, and (if a Postmark server token is configured) has the site actually sent any
-    transactional email recently — the clearest available signal that the form-to-email pipeline
-    is alive, without this app ever submitting a fake test lead itself."""
+    Contact page, without this app ever submitting a fake test lead itself."""
 
     def _analyze_forms(self, html: str) -> dict[str, Any]:
         soup = BeautifulSoup(html, "lxml")
@@ -90,33 +85,6 @@ class ContactFormsAuditor(BaseAuditor):
                 continue
         return None
 
-    async def _check_postmark_activity(self) -> dict[str, Any] | None:
-        token = getattr(self.site, "postmark_server_token", None)
-        if not token:
-            return None
-        try:
-            to_date = datetime.now(timezone.utc).date()
-            from_date = to_date - timedelta(days=POSTMARK_LOOKBACK_DAYS)
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(
-                    "https://api.postmarkapp.com/stats/outbound",
-                    params={"fromdate": from_date.isoformat(), "todate": to_date.isoformat()},
-                    headers={"X-Postmark-Server-Token": token, "Accept": "application/json"},
-                )
-            if resp.status_code == 401:
-                return {"status": "error", "message": "Postmark token is invalid or unauthorized."}
-            if resp.status_code != 200:
-                return {"status": "error", "message": f"Postmark API returned HTTP {resp.status_code}."}
-            sent = resp.json().get("Sent", 0)
-            return {
-                "status": "ok",
-                "sent_last_30_days": sent,
-                "has_recent_activity": sent > 0,
-            }
-        except Exception as exc:
-            logger.warning("Postmark activity check failed for %s: %s", self.site_url, exc)
-            return {"status": "error", "message": str(exc)}
-
     async def run(self) -> AuditModuleResult:
         issues: list[str] = []
         findings: dict[str, Any] = {}
@@ -139,9 +107,9 @@ class ContactFormsAuditor(BaseAuditor):
             home_analysis = self._analyze_forms(home_html)
             findings["homepage"] = home_analysis
             if home_analysis["best_form"] and home_analysis["best_form"]["looks_valid"]:
-                score += 40.0
+                score += 50.0
             elif home_analysis["form_count"] > 0:
-                score += 20.0
+                score += 25.0
                 issues.append(
                     "Homepage has a <form>, but it's missing an email field, message field, or submit button"
                 )
@@ -162,9 +130,9 @@ class ContactFormsAuditor(BaseAuditor):
                     contact_analysis = self._analyze_forms(contact_resp.text)
                     findings["contact_page"] = contact_analysis
                     if contact_analysis["best_form"] and contact_analysis["best_form"]["looks_valid"]:
-                        score += 40.0
+                        score += 50.0
                     elif contact_analysis["form_count"] > 0:
-                        score += 20.0
+                        score += 25.0
                         issues.append(
                             "Contact page has a <form>, but it's missing an email field, message field, or submit button"
                         )
@@ -173,37 +141,13 @@ class ContactFormsAuditor(BaseAuditor):
                 except Exception as exc:
                     issues.append(f"Failed to fetch Contact page: {exc}")
 
-        postmark = await self._check_postmark_activity()
-        findings["postmark"] = postmark
-        if postmark is None:
-            score += 20.0  # not configured — informational only, don't penalize
-        elif postmark["status"] == "error":
-            score += 10.0
-            issues.append(f"Postmark check failed: {postmark['message']}")
-        elif postmark["has_recent_activity"]:
-            score += 20.0
-        else:
-            score += 5.0
-            issues.append(
-                f"No outbound email sent via Postmark in the last {POSTMARK_LOOKBACK_DAYS} days — "
-                "worth confirming contact form delivery is actually working (or there's simply been no recent traffic)."
-            )
-
         final_score = round(max(0.0, min(100.0, score)), 1)
         status = self._score_to_status(final_score)
 
         if issues:
             summary = f"Contact form check {final_score:.0f}/100. {'; '.join(issues[:3])}"
-        elif postmark and postmark.get("has_recent_activity"):
-            summary = (
-                "Contact forms detected on both the homepage and Contact page, with recent "
-                "email activity confirmed via Postmark."
-            )
         else:
-            summary = (
-                "Contact forms detected on both the homepage and Contact page. "
-                "Add a Postmark server token to also confirm recent email delivery activity."
-            )
+            summary = "Contact forms detected on both the homepage and Contact page."
 
         findings["issues"] = issues
         return AuditModuleResult(

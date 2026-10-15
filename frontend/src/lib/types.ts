@@ -26,8 +26,6 @@ export interface Site {
   wp_username?: string | null
   wp_app_password?: string | null
   wp_app_password_configured?: boolean
-  postmark_server_token?: string | null
-  postmark_token_configured?: boolean
   nap_name?: string | null
   nap_address?: string | null
   nap_phone?: string | null
@@ -46,7 +44,6 @@ export interface SiteCreateInput {
   notify_email?: string | null
   wp_username?: string | null
   wp_app_password?: string | null
-  postmark_server_token?: string | null
   nap_name?: string | null
   nap_address?: string | null
   nap_phone?: string | null

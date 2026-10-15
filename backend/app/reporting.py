@@ -180,9 +180,6 @@ def _module_highlights(module: str, details: dict[str, Any]) -> dict[str, Any]:
                 highlights[f"{key}_form_incomplete"] = page["best_form"]
             elif page and not page.get("best_form"):
                 highlights[f"{key}_no_form_detected"] = True
-        postmark = details.get("postmark")
-        if postmark and postmark.get("status") == "ok" and not postmark.get("has_recent_activity"):
-            highlights["no_recent_postmark_email_activity"] = True
 
     elif module == "advertools":
         robots = details.get("robots_txt") or {}

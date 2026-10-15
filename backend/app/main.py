@@ -6,8 +6,9 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi_mcp import AuthConfig, FastApiMCP
 from rich.console import Console
 from rich.panel import Panel
 
@@ -16,7 +17,7 @@ from app.api.settings import load_persisted_settings, router as settings_router
 from app.api.sites import router as sites_router
 from app.api.users import router as users_router
 from app.auth.router import router as auth_router
-from app.auth.utils import get_password_hash
+from app.auth.utils import get_current_user, get_password_hash
 from app.config import settings
 from app.database import Base, SessionLocal, engine
 from app.models import User
@@ -132,6 +133,30 @@ app.include_router(users_router)
 app.include_router(sites_router)
 app.include_router(audits_router)
 app.include_router(settings_router)
+
+# Expose a subset of the sites/audits endpoints as MCP tools, reusing the same JWT-based
+# get_current_user dependency every other authenticated route already enforces — no separate
+# auth system for MCP clients. Deliberately read-mostly: create/update/delete a site and the
+# WP/connection-test endpoints are left out, since there's no reason an MCP client needs to
+# manage site credentials.
+mcp = FastApiMCP(
+    app,
+    name="WP Auditor MCP",
+    include_operations=[
+        "list_sites_sites_get",
+        "get_site_sites__site_id__get",
+        "trigger_audit_sites__site_id__audit_post",
+        "get_site_history_sites__site_id__history_get",
+        "list_audits_audits_get",
+        "get_audit_audits__audit_run_id__get",
+        "export_audit_audits__audit_run_id__export_get",
+        "get_audit_results_only_audits__audit_run_id__results_get",
+        "get_latest_audit_for_site_audits_latest__site_id__get",
+        "cancel_audit_audits__audit_run_id__cancel_post",
+    ],
+    auth_config=AuthConfig(dependencies=[Depends(get_current_user)]),
+)
+mcp.mount_http()
 
 # Mount Unlighthouse static reports directory
 from pathlib import Path

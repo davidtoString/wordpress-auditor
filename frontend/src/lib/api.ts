@@ -134,12 +134,6 @@ export const sites = {
     )
     return response.data
   },
-  async testPostmarkConnection(id: string): Promise<{ success: boolean; message: string }> {
-    const response = await api.post<{ success: boolean; message: string }>(
-      `/sites/${id}/test-postmark-connection`
-    )
-    return response.data
-  },
   async triggerAudit(id: string, scope: AuditScope = 'quick'): Promise<Audit> {
     const response = await api.post<Audit>(`/sites/${id}/audit`, { scope })
     return response.data
