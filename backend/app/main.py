@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from app.api.audits import router as audits_router
-from app.api.settings import router as settings_router
+from app.api.settings import load_persisted_settings, router as settings_router
 from app.api.sites import router as sites_router
 from app.api.users import router as users_router
 from app.auth.router import router as auth_router
@@ -20,7 +20,7 @@ from app.auth.utils import get_password_hash
 from app.config import settings
 from app.database import Base, SessionLocal, engine
 from app.models import User
-from app.scheduler import init_scheduler_with_sites, scheduler
+from app.scheduler import init_scheduler_with_sites, mark_orphaned_runs_as_failed, scheduler
 
 # Configure logging
 logging.basicConfig(
@@ -82,6 +82,8 @@ async def lifespan(app: FastAPI):
             scheduler.start()
         db = SessionLocal()
         try:
+            load_persisted_settings(db)
+            mark_orphaned_runs_as_failed(db)
             init_scheduler_with_sites(db)
         finally:
             db.close()

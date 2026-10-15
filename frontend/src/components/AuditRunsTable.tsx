@@ -8,6 +8,7 @@ import {
   Loader2,
   Calendar,
   Zap,
+  XCircle,
 } from 'lucide-react'
 import type { Audit } from '../lib/types'
 import { formatRelative, formatDate } from '../lib/utils'
@@ -57,6 +58,13 @@ export const AuditRunsTable: React.FC<AuditRunsTableProps> = ({
           <span className="inline-flex items-center gap-1 text-xs font-medium text-rose-600 dark:text-rose-400">
             <AlertCircle className="w-3.5 h-3.5" />
             Failed
+          </span>
+        )
+      case 'cancelled':
+        return (
+          <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 dark:text-slate-400">
+            <XCircle className="w-3.5 h-3.5" />
+            Cancelled
           </span>
         )
       default:

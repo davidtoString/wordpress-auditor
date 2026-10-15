@@ -11,34 +11,13 @@ logger = logging.getLogger(__name__)
 
 
 class SeoAuditor(BaseAuditor):
-    async def run(self) -> AuditModuleResult:
+    def _analyze_page(self, html: str) -> tuple[dict[str, Any], list[str], float]:
+        """On-page SEO checks (title, meta description, OG tags, canonical, robots meta,
+        headings) for a single page's HTML. Returns (findings, issues, score 0-100)."""
         score = 100.0
         findings: dict[str, Any] = {}
         issues: list[str] = []
-
-        timeout = httpx.Timeout(20.0, connect=10.0)
-
-        # 1. Fetch homepage
-        html_content = ""
-        try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
-                resp = await client.get(self.site_url, headers=self.DEFAULT_HEADERS)
-                findings["homepage_status_code"] = resp.status_code
-                if resp.status_code != 200:
-                    score -= 40
-                    issues.append(f"Homepage returned HTTP {resp.status_code}")
-                html_content = resp.text
-        except Exception as exc:
-            logger.error("SEO auditor error fetching homepage %s: %s", self.site_url, exc)
-            return AuditModuleResult(
-                module="seo",
-                score=0.0,
-                status="fail",
-                summary=f"Failed to fetch homepage: {str(exc)}",
-                details={"error": str(exc)},
-            )
-
-        soup = BeautifulSoup(html_content, "html.parser")
+        soup = BeautifulSoup(html, "lxml")
 
         # 2. Title tag analysis
         title_tag = soup.find("title")
@@ -142,12 +121,72 @@ class SeoAuditor(BaseAuditor):
             score -= 5
             issues.append("No <h2> subheadings found on homepage")
 
+        findings["issues"] = issues
+        return findings, issues, max(0.0, min(100.0, score))
+
+    async def run(self) -> AuditModuleResult:
+        timeout = httpx.Timeout(20.0, connect=10.0)
+
+        # 1. Fetch homepage (used for the detailed single-page findings below, plus the
+        # site-level robots.txt/sitemap.xml checks which apply once regardless of page count)
+        html_content = ""
+        homepage_status_code = None
+        try:
+            if self.shared_homepage is not None:
+                resp = self.shared_homepage
+            else:
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
+                    resp = await client.get(self.site_url, headers=self.DEFAULT_HEADERS)
+            homepage_status_code = resp.status_code
+            html_content = resp.text
+        except Exception as exc:
+            logger.error("SEO auditor error fetching homepage %s: %s", self.site_url, exc)
+            return AuditModuleResult(
+                module="seo",
+                score=0.0,
+                status="fail",
+                summary=f"Failed to fetch homepage: {str(exc)}",
+                details={"error": str(exc)},
+            )
+
+        findings, issues, homepage_score = self._analyze_page(html_content)
+        findings["homepage_status_code"] = homepage_status_code
+        if homepage_status_code != 200:
+            homepage_score = max(0.0, homepage_score - 40.0)
+            issues.append(f"Homepage returned HTTP {homepage_status_code}")
+
+        page_scores = [homepage_score]
+        pages_breakdown = [{"url": self.site_url, "score": round(homepage_score, 1), "issue_count": len(issues)}]
+
+        # Additional pages from the shared multi-page fetch (quick/with_posts/full scope), parsed
+        # across a bounded thread pool so a large page count doesn't block the event loop.
+        def _analyze_one(args: tuple[str, httpx.Response]):
+            url, page_resp = args
+            if page_resp.status_code != 200:
+                return None
+            try:
+                _, page_issues, page_score = self._analyze_page(page_resp.text)
+                return (url, page_issues, page_score)
+            except Exception as exc:
+                logger.debug("SEO per-page analysis failed for %s: %s", url, exc)
+                return None
+
+        other_pages = [(u, r) for u, r in self.shared_pages.items() if u != self.site_url]
+        for res in await self._run_in_threads(_analyze_one, other_pages):
+            if res is None:
+                continue
+            url, page_issues, page_score = res
+            page_scores.append(page_score)
+            pages_breakdown.append({"url": url, "score": round(page_score, 1), "issue_count": len(page_issues)})
+
+        score = sum(page_scores) / len(page_scores)
+
         # 8. Check robots.txt
         robots_url = f"{self.site_url}/robots.txt"
         findings["robots_txt"] = {"accessible": False, "has_sitemap": False}
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
-                rob_resp = await client.get(robots_url, headers=self.DEFAULT_HEADERS)
+                rob_resp = await self._request(client, "GET", robots_url)
                 if rob_resp.status_code == 200:
                     findings["robots_txt"]["accessible"] = True
                     content_lower = rob_resp.text.lower()
@@ -168,13 +207,13 @@ class SeoAuditor(BaseAuditor):
         findings["sitemap_xml"] = {"accessible": False, "status_code": None}
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
-                sitemap_resp = await client.get(sitemap_url, headers=self.DEFAULT_HEADERS)
+                sitemap_resp = await self._request(client, "GET", sitemap_url)
                 findings["sitemap_xml"]["status_code"] = sitemap_resp.status_code
                 if sitemap_resp.status_code == 200:
                     findings["sitemap_xml"]["accessible"] = True
                 else:
                     # Also try wp-sitemap.xml (standard WP core sitemap)
-                    wp_sitemap_resp = await client.get(f"{self.site_url}/wp-sitemap.xml", headers=self.DEFAULT_HEADERS)
+                    wp_sitemap_resp = await self._request(client, "GET", f"{self.site_url}/wp-sitemap.xml")
                     if wp_sitemap_resp.status_code == 200:
                         findings["sitemap_xml"]["accessible"] = True
                         findings["sitemap_xml"]["wp_sitemap"] = True
@@ -188,12 +227,20 @@ class SeoAuditor(BaseAuditor):
         final_score = max(0.0, min(100.0, score))
         status = self._score_to_status(final_score)
 
-        if issues:
+        if len(page_scores) > 1:
+            summary = (
+                f"SEO score {final_score:.0f}/100 averaged across {len(page_scores)} page(s). "
+                f"Homepage issues: {'; '.join(issues[:3])}" if issues else
+                f"SEO score {final_score:.0f}/100 averaged across {len(page_scores)} page(s)."
+            )
+        elif issues:
             summary = f"SEO score {final_score:.0f}/100. Key issues: {'; '.join(issues[:3])}"
         else:
             summary = "Excellent SEO hygiene: title, meta tags, OpenGraph, headings, and sitemaps are well configured."
 
         findings["issues"] = issues
+        findings["total_pages_scanned"] = len(page_scores)
+        findings["pages"] = pages_breakdown
 
         return AuditModuleResult(
             module="seo",

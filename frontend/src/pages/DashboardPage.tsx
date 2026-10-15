@@ -27,7 +27,7 @@ import { sites as sitesApi, audits as auditsApi, settings as settingsApi } from 
 import { useAuth } from '../lib/auth'
 import ScoreBadge from '../components/ScoreBadge'
 import AuditRunsTable from '../components/AuditRunsTable'
-import { formatRelative, scoreToColor } from '../lib/utils'
+import { formatRelative, getAppDateString, parseDateSafe, scoreToColor } from '../lib/utils'
 import toast from 'react-hot-toast'
 
 export const DashboardPage: React.FC = () => {
@@ -86,8 +86,11 @@ export const DashboardPage: React.FC = () => {
   const totalSites = siteList.length
   const activeSites = siteList.filter((s) => s.is_active !== false).length
 
-  const todayStr = new Date().toISOString().slice(0, 10)
-  const auditsToday = recentAudits.filter((a) => a.started_at?.startsWith(todayStr)).length
+  const todayStr = getAppDateString()
+  const auditsToday = recentAudits.filter((a) => {
+    const started = parseDateSafe(a.started_at)
+    return started ? getAppDateString(started) === todayStr : false
+  }).length
 
   const scoredSites = siteList.filter((s) => s.last_score !== null && s.last_score !== undefined)
   const avgScore =

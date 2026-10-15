@@ -64,9 +64,9 @@ class NapAuditor(BaseAuditor):
 
     async def _fetch_html(self, client: httpx.AsyncClient, url: str) -> BeautifulSoup | None:
         try:
-            resp = await client.get(url, headers=self.DEFAULT_HEADERS)
+            resp = await self._request(client, "GET", url)
             if resp.status_code == 200:
-                return BeautifulSoup(resp.text, "html.parser")
+                return BeautifulSoup(resp.text, "lxml")
         except Exception as exc:
             logger.debug("NAP fetch %s failed: %s", url, exc)
         return None

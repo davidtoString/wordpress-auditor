@@ -22,6 +22,9 @@ export const EditSitePage: React.FC = () => {
     mutationFn: (data: SiteUpdateInput) => sitesApi.update(id!, data),
     onSuccess: (updated) => {
       toast.success(`Successfully updated site: ${updated.name}`)
+      if (updated.url_redirect_warning) {
+        toast(updated.url_redirect_warning, { icon: '⚠️', duration: 12000 })
+      }
       queryClient.invalidateQueries({ queryKey: ['sites'] })
       queryClient.invalidateQueries({ queryKey: ['site', id] })
       navigate(`/sites/${id}`)

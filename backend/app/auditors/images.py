@@ -16,18 +16,49 @@ class ImagesAuditor(BaseAuditor):
     MAX_IMAGES_TO_MEASURE = 20
     OVERSIZED_THRESHOLD_BYTES = 500 * 1024  # 500 KB
 
+    def _extract_page_images(self, html: str, page_url: str) -> list[dict[str, Any]]:
+        """Parse <img> tags out of one page's HTML into a flat per-image finding list."""
+        soup = BeautifulSoup(html, "lxml")
+        img_tags = soup.find_all("img")
+        results: list[dict[str, Any]] = []
+        for idx, img in enumerate(img_tags):
+            src = img.get("src", "").strip()
+            data_src = img.get("data-src", "").strip()
+            actual_src = src or data_src
+            if not actual_src or actual_src.startswith("data:"):
+                continue
+            full_src = urljoin(page_url, actual_src)
+            alt = img.get("alt")
+            loading = img.get("loading", "").lower()
+            width = img.get("width")
+            height = img.get("height")
+            src_lower = actual_src.lower().split("?")[0]
+            results.append({
+                "url": full_src,
+                "missing_alt": alt is None or not alt.strip(),
+                "non_modern": not (
+                    src_lower.endswith(".webp") or src_lower.endswith(".avif") or src_lower.endswith(".svg")
+                ),
+                "missing_lazy": idx >= 2 and loading != "lazy",
+                "missing_dimensions": not width or not height,
+            })
+        return results
+
     async def _check_image_size(self, client: httpx.AsyncClient, img_url: str) -> int | None:
-        """Fetch Content-Length header for image URL."""
+        """Fetch Content-Length header for image URL. Previously this ran with NO concurrency
+        bound at all (up to MAX_IMAGES_TO_MEASURE requests fired simultaneously) — now goes
+        through the shared run-wide request budget like every other module's extra requests."""
         try:
-            resp = await client.head(img_url, headers=self.DEFAULT_HEADERS)
+            resp = await self._request(client, "HEAD", img_url)
             cl = resp.headers.get("content-length")
             if cl and cl.isdigit():
                 return int(cl)
             # Fallback to GET stream if HEAD didn't return content-length
-            async with client.stream("GET", img_url, headers=self.DEFAULT_HEADERS) as s_resp:
-                cl = s_resp.headers.get("content-length")
-                if cl and cl.isdigit():
-                    return int(cl)
+            async with self._request_sem:
+                async with client.stream("GET", img_url, headers=self.DEFAULT_HEADERS) as s_resp:
+                    cl = s_resp.headers.get("content-length")
+                    if cl and cl.isdigit():
+                        return int(cl)
         except Exception:
             pass
         return None
@@ -46,17 +77,20 @@ class ImagesAuditor(BaseAuditor):
 
         html_body = ""
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
-                resp = await client.get(self.site_url, headers=self.DEFAULT_HEADERS)
-                if resp.status_code != 200:
-                    return AuditModuleResult(
-                        module="images",
-                        score=0.0,
-                        status="fail",
-                        summary=f"Unable to load homepage for image audit (HTTP {resp.status_code})",
-                        details={"status_code": resp.status_code},
-                    )
-                html_body = resp.text
+            if self.shared_homepage is not None:
+                resp = self.shared_homepage
+            else:
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
+                    resp = await client.get(self.site_url, headers=self.DEFAULT_HEADERS)
+            if resp.status_code != 200:
+                return AuditModuleResult(
+                    module="images",
+                    score=0.0,
+                    status="fail",
+                    summary=f"Unable to load homepage for image audit (HTTP {resp.status_code})",
+                    details={"status_code": resp.status_code},
+                )
+            html_body = resp.text
         except Exception as exc:
             return AuditModuleResult(
                 module="images",
@@ -66,53 +100,60 @@ class ImagesAuditor(BaseAuditor):
                 details={"error": str(exc)},
             )
 
-        soup = BeautifulSoup(html_body, "html.parser")
-        img_tags = soup.find_all("img")
-        findings["total_images"] = len(img_tags)
+        all_images = self._extract_page_images(html_body, self.site_url)
+        pages_breakdown = [{"url": self.site_url, "image_count": len(all_images)}]
 
-        if len(img_tags) == 0:
+        def _analyze_one(args: tuple[str, httpx.Response]):
+            url, page_resp = args
+            if page_resp.status_code != 200:
+                return None
+            try:
+                return (url, self._extract_page_images(page_resp.text, url))
+            except Exception as exc:
+                logger.debug("Images per-page analysis failed for %s: %s", url, exc)
+                return None
+
+        other_pages = [(u, r) for u, r in self.shared_pages.items() if u != self.site_url]
+        for res in await self._run_in_threads(_analyze_one, other_pages):
+            if res is None:
+                continue
+            url, page_images = res
+            all_images.extend(page_images)
+            pages_breakdown.append({"url": url, "image_count": len(page_images)})
+
+        findings["total_images"] = len(all_images)
+        findings["total_pages_scanned"] = len(pages_breakdown)
+        findings["pages"] = pages_breakdown
+
+        if len(all_images) == 0:
             return AuditModuleResult(
                 module="images",
                 score=100.0,
                 status="pass",
-                summary="No <img> elements found on the homepage.",
-                details={"total_images": 0},
+                summary=f"No <img> elements found across {len(pages_breakdown)} scanned page(s).",
+                details=findings,
             )
 
-        images_to_probe = []
+        for img in all_images:
+            if img["missing_alt"]:
+                findings["missing_alt"].append(img["url"])
+            if img["non_modern"]:
+                findings["non_modern_formats"].append(img["url"])
+            if img["missing_lazy"]:
+                findings["missing_lazy_loading"].append(img["url"])
+            if img["missing_dimensions"]:
+                findings["missing_dimensions"].append(img["url"])
 
-        for idx, img in enumerate(img_tags):
-            src = img.get("src", "").strip()
-            data_src = img.get("data-src", "").strip()
-            actual_src = src or data_src
-            if not actual_src or actual_src.startswith("data:"):
-                continue
-
-            full_src = urljoin(self.site_url, actual_src)
-            alt = img.get("alt")
-            loading = img.get("loading", "").lower()
-            width = img.get("width")
-            height = img.get("height")
-
-            # Check alt text
-            if alt is None or not alt.strip():
-                findings["missing_alt"].append(full_src)
-
-            # Check modern format (.webp, .avif, .svg)
-            src_lower = actual_src.lower().split("?")[0]
-            if not (src_lower.endswith(".webp") or src_lower.endswith(".avif") or src_lower.endswith(".svg")):
-                findings["non_modern_formats"].append(full_src)
-
-            # Check lazy loading (skip first 2 above-the-fold images)
-            if idx >= 2 and loading != "lazy":
-                findings["missing_lazy_loading"].append(full_src)
-
-            # Check width/height for layout shift prevention
-            if not width or not height:
-                findings["missing_dimensions"].append(full_src)
-
-            if len(images_to_probe) < self.MAX_IMAGES_TO_MEASURE:
-                images_to_probe.append(full_src)
+        # Dedupe before probing sizes — the same shared asset (e.g. a logo) appearing on every
+        # page should only be fetched once, not once per page it's embedded on.
+        images_to_probe: list[str] = []
+        seen_urls: set[str] = set()
+        for img in all_images:
+            if img["url"] not in seen_urls:
+                seen_urls.add(img["url"])
+                images_to_probe.append(img["url"])
+            if len(images_to_probe) >= self.MAX_IMAGES_TO_MEASURE:
+                break
 
         # Measure file sizes for candidate images
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:

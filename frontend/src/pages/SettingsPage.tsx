@@ -32,13 +32,17 @@ export const SettingsPage: React.FC = () => {
     queryFn: () => settingsApi.getSchedulerJobs(),
   })
 
-  // State for form
+  // Secret fields: always start blank. The GET response only ever returns a masked preview
+  // (e.g. "sk-1...bcd3") or "" — never the real key — so pre-filling the input from it would
+  // just show garbage, and re-saving that garbage would corrupt the real stored key. Blank means
+  // "leave the saved key alone"; only a field the admin actually types into gets sent on save.
   const [openaiKey, setOpenaiKey] = useState('')
   const [geminiKey, setGeminiKey] = useState('')
   const [aiProvider, setAiProvider] = useState<'openai' | 'gemini'>('openai')
   const [pagespeedKey, setPagespeedKey] = useState('')
   const [resendKey, setResendKey] = useState('')
   const [resendFromEmail, setResendFromEmail] = useState('')
+  const [resendFromName, setResendFromName] = useState('')
   const [alertEmail, setAlertEmail] = useState('')
 
   // Eye toggles for masked fields
@@ -47,16 +51,14 @@ export const SettingsPage: React.FC = () => {
   const [showPagespeed, setShowPagespeed] = useState(false)
   const [showResend, setShowResend] = useState(false)
 
-  // Populate from query
+  // Populate only the non-secret fields from the fetched data (these aren't masked, so showing
+  // and re-saving the real value is fine). AI_PROVIDER has a real default even when unset.
   useEffect(() => {
     if (settingsData) {
-      setOpenaiKey(settingsData.openai_api_key || '')
-      setGeminiKey(settingsData.gemini_api_key || '')
-      setAiProvider(settingsData.ai_provider || 'openai')
-      setPagespeedKey(settingsData.google_pagespeed_api_key || '')
-      setResendKey(settingsData.resend_api_key || '')
-      setResendFromEmail(settingsData.resend_from_email || '')
-      setAlertEmail(settingsData.alert_email || '')
+      setAiProvider(settingsData.AI_PROVIDER || 'openai')
+      setResendFromEmail(settingsData.RESEND_FROM_EMAIL || '')
+      setResendFromName(settingsData.RESEND_FROM_NAME || '')
+      setAlertEmail(settingsData.ALERT_EMAIL || '')
     }
   }, [settingsData])
 
@@ -65,6 +67,13 @@ export const SettingsPage: React.FC = () => {
     mutationFn: (data: Partial<Settings>) => settingsApi.update(data),
     onSuccess: () => {
       toast.success('Configuration settings saved successfully')
+      // Clear the secret inputs so the UI doesn't look like they're still sitting there
+      // unsaved — the "Currently saved" badge (driven by the refetched *_configured flags)
+      // is what actually confirms the save now.
+      setOpenaiKey('')
+      setGeminiKey('')
+      setPagespeedKey('')
+      setResendKey('')
       queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
     onError: (err: any) => {
@@ -98,15 +107,20 @@ export const SettingsPage: React.FC = () => {
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault()
-    saveMutation.mutate({
-      openai_api_key: openaiKey.trim(),
-      gemini_api_key: geminiKey.trim(),
-      ai_provider: aiProvider,
-      google_pagespeed_api_key: pagespeedKey.trim(),
-      resend_api_key: resendKey.trim(),
-      resend_from_email: resendFromEmail.trim(),
-      alert_email: alertEmail.trim(),
-    })
+    const payload: Partial<Settings> = {
+      AI_PROVIDER: aiProvider,
+      RESEND_FROM_EMAIL: resendFromEmail.trim(),
+      RESEND_FROM_NAME: resendFromName.trim(),
+      ALERT_EMAIL: alertEmail.trim(),
+    }
+    // Secrets: only include ones the admin actually typed a new value into, so leaving a field
+    // blank keeps whatever was already saved instead of overwriting it with an empty string.
+    if (openaiKey.trim()) payload.OPENAI_API_KEY = openaiKey.trim()
+    if (geminiKey.trim()) payload.GEMINI_API_KEY = geminiKey.trim()
+    if (pagespeedKey.trim()) payload.GOOGLE_PAGESPEED_API_KEY = pagespeedKey.trim()
+    if (resendKey.trim()) payload.RESEND_API_KEY = resendKey.trim()
+
+    saveMutation.mutate(payload)
   }
 
   if (settingsLoading) {
@@ -182,15 +196,21 @@ export const SettingsPage: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
             {/* OpenAI API Key */}
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
-                OpenAI API Key
+              <label className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+                <span>OpenAI API Key</span>
+                {settingsData?.openai_configured && (
+                  <span className="inline-flex items-center gap-1 normal-case font-medium text-emerald-600 dark:text-emerald-400">
+                    <CheckCircle2 className="w-3 h-3" />
+                    Currently saved
+                  </span>
+                )}
               </label>
               <div className="relative">
                 <input
                   type={showOpenai ? 'text' : 'password'}
                   value={openaiKey}
                   onChange={(e) => setOpenaiKey(e.target.value)}
-                  placeholder="sk-..."
+                  placeholder={settingsData?.openai_configured ? 'Leave blank to keep the saved key' : 'sk-...'}
                   className="w-full pl-3.5 pr-10 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
                 />
                 <button
@@ -205,15 +225,21 @@ export const SettingsPage: React.FC = () => {
 
             {/* Gemini API Key */}
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
-                Google Gemini API Key
+              <label className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+                <span>Google Gemini API Key</span>
+                {settingsData?.gemini_configured && (
+                  <span className="inline-flex items-center gap-1 normal-case font-medium text-emerald-600 dark:text-emerald-400">
+                    <CheckCircle2 className="w-3 h-3" />
+                    Currently saved
+                  </span>
+                )}
               </label>
               <div className="relative">
                 <input
                   type={showGemini ? 'text' : 'password'}
                   value={geminiKey}
                   onChange={(e) => setGeminiKey(e.target.value)}
-                  placeholder="AIza..."
+                  placeholder={settingsData?.gemini_configured ? 'Leave blank to keep the saved key' : 'AIza...'}
                   className="w-full pl-3.5 pr-10 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
                 />
                 <button
@@ -245,15 +271,21 @@ export const SettingsPage: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
-              PageSpeed API Key
+            <label className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+              <span>PageSpeed API Key</span>
+              {settingsData?.pagespeed_configured && (
+                <span className="inline-flex items-center gap-1 normal-case font-medium text-emerald-600 dark:text-emerald-400">
+                  <CheckCircle2 className="w-3 h-3" />
+                  Currently saved
+                </span>
+              )}
             </label>
             <div className="relative">
               <input
                 type={showPagespeed ? 'text' : 'password'}
                 value={pagespeedKey}
                 onChange={(e) => setPagespeedKey(e.target.value)}
-                placeholder="AIza..."
+                placeholder={settingsData?.pagespeed_configured ? 'Leave blank to keep the saved key' : 'AIza...'}
                 className="w-full pl-3.5 pr-10 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
               />
               <button
@@ -301,15 +333,21 @@ export const SettingsPage: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
-              Resend API Key
+            <label className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+              <span>Resend API Key</span>
+              {settingsData?.resend_configured && (
+                <span className="inline-flex items-center gap-1 normal-case font-medium text-emerald-600 dark:text-emerald-400">
+                  <CheckCircle2 className="w-3 h-3" />
+                  Currently saved
+                </span>
+              )}
             </label>
             <div className="relative">
               <input
                 type={showResend ? 'text' : 'password'}
                 value={resendKey}
                 onChange={(e) => setResendKey(e.target.value)}
-                placeholder="re_..."
+                placeholder={settingsData?.resend_configured ? 'Leave blank to keep the saved key' : 're_...'}
                 className="w-full pl-3.5 pr-10 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
               />
               <button
@@ -332,6 +370,19 @@ export const SettingsPage: React.FC = () => {
                 value={resendFromEmail}
                 onChange={(e) => setResendFromEmail(e.target.value)}
                 placeholder="audits@yourdomain.com"
+                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+                Resend From Name
+              </label>
+              <input
+                type="text"
+                value={resendFromName}
+                onChange={(e) => setResendFromName(e.target.value)}
+                placeholder="WP Auditor"
                 className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
               />
             </div>

@@ -100,7 +100,7 @@ class CookiesAuditor(BaseAuditor):
             for k, v in resp.cookies.items():
                 result["cookies"].append({"name": k, "domain": "", "path": "", "value": v[:10]})
 
-            soup = BeautifulSoup(resp.text, "html.parser")
+            soup = BeautifulSoup(resp.text, "lxml")
             for sel in self.BANNER_SELECTORS:
                 matched = soup.select(sel)
                 if matched:

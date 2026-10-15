@@ -1,6 +1,6 @@
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
-import { format, formatDistanceToNow, isValid, parseISO } from 'date-fns'
+import { formatDistanceToNow, isValid, parseISO } from 'date-fns'
 import {
   Gauge,
   Search,
@@ -20,6 +20,7 @@ import {
   XCircle,
   Compass,
   HelpCircle,
+  MailCheck,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -27,11 +28,26 @@ export function cn(...inputs: ClassValue[]): string {
   return twMerge(clsx(inputs))
 }
 
+// The app's canonical timezone for displaying and reasoning about dates ("today", cron
+// schedules, etc.) — independent of the viewer's own browser/OS timezone, and matching the
+// backend scheduler's APP_TIMEZONE.
+export const APP_TIMEZONE = 'America/Mexico_City'
+
+const HAS_TZ_DESIGNATOR = /Z$|[+-]\d{2}:\d{2}$/
+
 export function parseDateSafe(date: string | number | Date | null | undefined): Date | null {
   if (!date) return null
   if (date instanceof Date) return isValid(date) ? date : null
   try {
-    const parsed = typeof date === 'string' ? parseISO(date) : new Date(date)
+    if (typeof date === 'string') {
+      // The API always returns naive-but-UTC timestamps (no 'Z'/offset suffix). Without this,
+      // parseISO treats a bare string as local time in the viewer's browser, silently shifting
+      // every displayed time by whatever that viewer's UTC offset happens to be.
+      const normalized = HAS_TZ_DESIGNATOR.test(date) ? date : `${date}Z`
+      const parsed = parseISO(normalized)
+      return isValid(parsed) ? parsed : null
+    }
+    const parsed = new Date(date)
     return isValid(parsed) ? parsed : null
   } catch {
     return null
@@ -41,13 +57,33 @@ export function parseDateSafe(date: string | number | Date | null | undefined): 
 export function formatDate(date: string | number | Date | null | undefined): string {
   const parsed = parseDateSafe(date)
   if (!parsed) return 'Never'
-  return format(parsed, 'MMM d, yyyy h:mm a')
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: APP_TIMEZONE,
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZoneName: 'short',
+  }).format(parsed)
 }
 
 export function formatRelative(date: string | number | Date | null | undefined): string {
   const parsed = parseDateSafe(date)
   if (!parsed) return 'Never'
   return formatDistanceToNow(parsed, { addSuffix: true })
+}
+
+/** "YYYY-MM-DD" for the given instant as a calendar day in APP_TIMEZONE — for "is this today"
+ * comparisons that should follow Mexico City's day boundary, not the viewer's or server's. */
+export function getAppDateString(date: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: APP_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date)
 }
 
 export function scoreToColor(score: number | null | undefined): string {
@@ -122,6 +158,7 @@ export function moduleDisplayName(module: string): string {
     accessibility: 'Accessibility (A11y)',
     a11y: 'Accessibility (A11y)',
     uptime: 'Uptime & Response',
+    contact_forms: 'Contact Forms',
   }
   return map[module.toLowerCase()] || module.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
@@ -146,6 +183,7 @@ export function moduleIcon(module: string): LucideIcon {
     accessibility: Eye,
     a11y: Eye,
     uptime: Activity,
+    contact_forms: MailCheck,
   }
   return map[module.toLowerCase()] || Activity
 }

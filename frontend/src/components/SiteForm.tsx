@@ -10,8 +10,12 @@ import {
   Loader2,
   Info,
   Check,
+  ShieldCheck,
+  ShieldAlert,
+  PlugZap,
 } from 'lucide-react'
 import type { Site, SiteCreateInput } from '../lib/types'
+import { sites as sitesApi } from '../lib/api'
 
 interface SiteFormProps {
   initialValues?: Partial<Site>
@@ -33,15 +37,49 @@ export const SiteForm: React.FC<SiteFormProps> = ({
   const [name, setName] = useState(initialValues?.name || '')
   const [url, setUrl] = useState(initialValues?.url || '')
   const [cronSchedule, setCronSchedule] = useState(initialValues?.cron_schedule || '0 6 * * *')
-  const [notificationEmail, setNotificationEmail] = useState(initialValues?.notification_email || '')
+  const [notificationEmail, setNotificationEmail] = useState(initialValues?.notify_email || '')
   const [isActive, setIsActive] = useState(initialValues?.is_active !== false)
 
   // Collapsible sections
   const [showWpCredentials, setShowWpCredentials] = useState(
-    !!initialValues?.wp_username || !!initialValues?.wp_app_password
+    !!initialValues?.wp_username || !!initialValues?.wp_app_password_configured
   )
   const [wpUsername, setWpUsername] = useState(initialValues?.wp_username || '')
   const [wpAppPassword, setWpAppPassword] = useState(initialValues?.wp_app_password || '')
+  const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
+  const [testMessage, setTestMessage] = useState('')
+
+  const handleTestConnection = async () => {
+    if (!initialValues?.id) return
+    setTestStatus('testing')
+    setTestMessage('')
+    try {
+      const result = await sitesApi.testWpConnection(initialValues.id)
+      setTestStatus(result.success ? 'success' : 'error')
+      setTestMessage(result.message)
+    } catch (err: any) {
+      setTestStatus('error')
+      setTestMessage(err.response?.data?.detail || 'Connection test failed.')
+    }
+  }
+
+  const [postmarkToken, setPostmarkToken] = useState(initialValues?.postmark_server_token || '')
+  const [postmarkTestStatus, setPostmarkTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
+  const [postmarkTestMessage, setPostmarkTestMessage] = useState('')
+
+  const handleTestPostmarkConnection = async () => {
+    if (!initialValues?.id) return
+    setPostmarkTestStatus('testing')
+    setPostmarkTestMessage('')
+    try {
+      const result = await sitesApi.testPostmarkConnection(initialValues.id)
+      setPostmarkTestStatus(result.success ? 'success' : 'error')
+      setPostmarkTestMessage(result.message)
+    } catch (err: any) {
+      setPostmarkTestStatus('error')
+      setPostmarkTestMessage(err.response?.data?.detail || 'Connection test failed.')
+    }
+  }
 
   const [showNapConfig, setShowNapConfig] = useState(
     !!initialValues?.nap_name || !!initialValues?.nap_address || !!initialValues?.nap_phone
@@ -69,10 +107,11 @@ export const SiteForm: React.FC<SiteFormProps> = ({
       name: name.trim(),
       url: normalizedUrl,
       cron_schedule: cronSchedule.trim(),
-      notification_email: notificationEmail.trim() || null,
+      notify_email: notificationEmail.trim() || null,
       is_active: isActive,
       wp_username: wpUsername.trim() || null,
       wp_app_password: wpAppPassword.trim() || null,
+      postmark_server_token: postmarkToken.trim() || null,
       nap_name: napName.trim() || null,
       nap_address: napAddress.trim() || null,
       nap_phone: napPhone.trim() || null,
@@ -142,17 +181,19 @@ export const SiteForm: React.FC<SiteFormProps> = ({
               htmlFor="cronSchedule"
               className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5"
             >
-              Cron Schedule Expression
+              Cron Schedule Expression{' '}
+              <span className="normal-case font-normal text-slate-400">(Mexico City time)</span>
             </label>
             <div className="flex flex-col sm:flex-row gap-3">
               <input
                 id="cronSchedule"
                 type="text"
-                required
+                required={isActive}
+                disabled={!isActive}
                 value={cronSchedule}
                 onChange={(e) => setCronSchedule(e.target.value)}
                 placeholder="0 6 * * *"
-                className="flex-1 px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
+                className="flex-1 px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50 disabled:cursor-not-allowed"
               />
             </div>
             {/* Presets */}
@@ -162,9 +203,12 @@ export const SiteForm: React.FC<SiteFormProps> = ({
                 <button
                   key={preset.value}
                   type="button"
-                  onClick={() => setCronSchedule(preset.value)}
+                  onClick={() => {
+                    setCronSchedule(preset.value)
+                    setIsActive(true)
+                  }}
                   className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                    cronSchedule === preset.value
+                    isActive && cronSchedule === preset.value
                       ? 'bg-brand-50 dark:bg-brand-950/60 border-brand-500 text-brand-600 dark:text-brand-400 font-semibold'
                       : 'border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400'
                   }`}
@@ -172,7 +216,23 @@ export const SiteForm: React.FC<SiteFormProps> = ({
                   {preset.label} ({preset.value})
                 </button>
               ))}
+              <button
+                type="button"
+                onClick={() => setIsActive(false)}
+                className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+                  !isActive
+                    ? 'bg-slate-200 dark:bg-slate-700 border-slate-400 dark:border-slate-500 text-slate-700 dark:text-slate-200 font-semibold'
+                    : 'border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                No automatic audit (manual only)
+              </button>
             </div>
+            {!isActive && (
+              <p className="text-xs text-slate-400 mt-1.5">
+                Automated scheduled audits are off for this site — audits only run when triggered manually.
+              </p>
+            )}
           </div>
 
           {/* Notification Email Override */}
@@ -227,10 +287,10 @@ export const SiteForm: React.FC<SiteFormProps> = ({
               <KeyRound className="w-4 h-4 text-purple-500" />
               <div>
                 <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-                  WordPress Application Passwords (Optional)
+                  Integration Credentials (Optional)
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Used by WP Health & deep core diagnostic checks via WP REST API.
+                  WordPress REST API for deep diagnostics, and Postmark for contact-form delivery checks.
                 </p>
               </div>
             </div>
@@ -271,19 +331,133 @@ export const SiteForm: React.FC<SiteFormProps> = ({
                 <div>
                   <label
                     htmlFor="wpAppPassword"
-                    className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5"
+                    className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5"
                   >
-                    Application Password
+                    <span>Application Password</span>
+                    {initialValues?.wp_app_password_configured && (
+                      <span className="inline-flex items-center gap-1 normal-case font-medium text-emerald-600 dark:text-emerald-400">
+                        <Check className="w-3 h-3" />
+                        Currently saved
+                      </span>
+                    )}
                   </label>
                   <input
                     id="wpAppPassword"
                     type="password"
                     value={wpAppPassword}
                     onChange={(e) => setWpAppPassword(e.target.value)}
-                    placeholder="xxxx xxxx xxxx xxxx"
+                    placeholder={
+                      initialValues?.wp_app_password_configured
+                        ? 'Leave blank to keep the saved password'
+                        : 'xxxx xxxx xxxx xxxx'
+                    }
                     className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
                   />
                 </div>
+              </div>
+
+              {initialValues?.id && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleTestConnection}
+                      disabled={testStatus === 'testing' || !initialValues?.wp_app_password_configured}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-700/70 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors disabled:opacity-50"
+                    >
+                      {testStatus === 'testing' ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <PlugZap className="w-3.5 h-3.5" />
+                      )}
+                      Test Connection
+                    </button>
+                    <span className="text-[11px] text-slate-400">
+                      Tests the currently saved credentials — save first if you just changed them above.
+                    </span>
+                  </div>
+                  {testStatus === 'success' && (
+                    <div className="flex items-start gap-1.5 text-xs text-emerald-700 dark:text-emerald-400">
+                      <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{testMessage}</span>
+                    </div>
+                  )}
+                  {testStatus === 'error' && (
+                    <div className="flex items-start gap-1.5 text-xs text-rose-700 dark:text-rose-400">
+                      <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{testMessage}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="pt-2 border-t border-slate-100 dark:border-slate-700/60 space-y-4">
+                <div>
+                  <label
+                    htmlFor="postmarkToken"
+                    className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5"
+                  >
+                    <span>Postmark Server Token</span>
+                    {initialValues?.postmark_token_configured && (
+                      <span className="inline-flex items-center gap-1 normal-case font-medium text-emerald-600 dark:text-emerald-400">
+                        <Check className="w-3 h-3" />
+                        Currently saved
+                      </span>
+                    )}
+                  </label>
+                  <input
+                    id="postmarkToken"
+                    type="password"
+                    value={postmarkToken}
+                    onChange={(e) => setPostmarkToken(e.target.value)}
+                    placeholder={
+                      initialValues?.postmark_token_configured
+                        ? 'Leave blank to keep the saved token'
+                        : 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+                    }
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
+                  />
+                  <p className="text-[11px] text-slate-400 mt-1.5">
+                    Used by the Contact Forms audit module to check for recent outbound email
+                    activity — the clearest available signal the form-to-email pipeline works,
+                    without submitting a real test message to the site.
+                  </p>
+                </div>
+
+                {initialValues?.id && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={handleTestPostmarkConnection}
+                        disabled={postmarkTestStatus === 'testing' || !initialValues?.postmark_token_configured}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-700/70 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors disabled:opacity-50"
+                      >
+                        {postmarkTestStatus === 'testing' ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <PlugZap className="w-3.5 h-3.5" />
+                        )}
+                        Test Connection
+                      </button>
+                      <span className="text-[11px] text-slate-400">
+                        Tests the currently saved token — save first if you just changed it above.
+                      </span>
+                    </div>
+                    {postmarkTestStatus === 'success' && (
+                      <div className="flex items-start gap-1.5 text-xs text-emerald-700 dark:text-emerald-400">
+                        <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{postmarkTestMessage}</span>
+                      </div>
+                    )}
+                    {postmarkTestStatus === 'error' && (
+                      <div className="flex items-start gap-1.5 text-xs text-rose-700 dark:text-rose-400">
+                        <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{postmarkTestMessage}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}

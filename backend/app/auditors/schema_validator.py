@@ -23,19 +23,50 @@ class SchemaValidatorAuditor(BaseAuditor):
         "faqpage": ["mainEntity"],
     }
 
-    def _flatten_schemas(self, data: Any) -> list[dict[str, Any]]:
-        """Flatten nested schemas and @graph structures."""
+    def _flatten_schemas(self, data: Any, inherited_context: Any = None) -> list[dict[str, Any]]:
+        """Flatten nested schemas and @graph structures.
+
+        A JSON-LD @graph wrapper conventionally declares '@context' once at the top level and
+        omits it on every individual node inside @graph — this is valid per the JSON-LD spec
+        (the context applies to the whole graph document, not per-node), and is exactly the
+        pattern Yoast SEO and most other WordPress SEO plugins emit. Previously, flattening threw
+        the parent's @context away entirely, so every single graph-nested schema (which, on a
+        Yoast-powered site, is *all* of them) was incorrectly flagged as missing @context — a
+        false positive on the majority of real WordPress sites. Each flattened node now inherits
+        the nearest enclosing @context unless it declares its own override.
+        """
         results = []
         if isinstance(data, list):
             for item in data:
-                results.extend(self._flatten_schemas(item))
+                results.extend(self._flatten_schemas(item, inherited_context))
         elif isinstance(data, dict):
+            context = data.get("@context", inherited_context)
             if "@graph" in data and isinstance(data["@graph"], list):
                 for item in data["@graph"]:
-                    results.extend(self._flatten_schemas(item))
+                    results.extend(self._flatten_schemas(item, context))
             else:
+                if "@context" not in data and context is not None:
+                    data = {**data, "@context": context}
                 results.append(data)
         return results
+
+    def _extract_page_schemas(self, html: str) -> tuple[int, list[dict[str, Any]], list[str]]:
+        """Parse a single page's JSON-LD <script> blocks. Returns (block_count, flattened
+        schema dicts, parse error messages)."""
+        soup = BeautifulSoup(html, "lxml")
+        script_tags = soup.find_all("script", type="application/ld+json")
+        raw_schemas: list[dict[str, Any]] = []
+        parse_errors: list[str] = []
+        for idx, tag in enumerate(script_tags):
+            content = tag.string or tag.get_text()
+            if not content.strip():
+                continue
+            try:
+                parsed = json.loads(content)
+                raw_schemas.extend(self._flatten_schemas(parsed))
+            except Exception as exc:
+                parse_errors.append(f"Block #{idx+1}: Invalid JSON syntax ({exc})")
+        return len(script_tags), raw_schemas, parse_errors
 
     async def run(self) -> AuditModuleResult:
         findings: dict[str, Any] = {
@@ -48,17 +79,20 @@ class SchemaValidatorAuditor(BaseAuditor):
 
         html_body = ""
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
-                resp = await client.get(self.site_url, headers=self.DEFAULT_HEADERS)
-                if resp.status_code != 200:
-                    return AuditModuleResult(
-                        module="schema",
-                        score=0.0,
-                        status="fail",
-                        summary=f"Unable to load homepage for schema validation (HTTP {resp.status_code})",
-                        details={"status_code": resp.status_code},
-                    )
-                html_body = resp.text
+            if self.shared_homepage is not None:
+                resp = self.shared_homepage
+            else:
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
+                    resp = await client.get(self.site_url, headers=self.DEFAULT_HEADERS)
+            if resp.status_code != 200:
+                return AuditModuleResult(
+                    module="schema",
+                    score=0.0,
+                    status="fail",
+                    summary=f"Unable to load homepage for schema validation (HTTP {resp.status_code})",
+                    details={"status_code": resp.status_code},
+                )
+            html_body = resp.text
         except Exception as exc:
             return AuditModuleResult(
                 module="schema",
@@ -68,22 +102,45 @@ class SchemaValidatorAuditor(BaseAuditor):
                 details={"error": str(exc)},
             )
 
-        soup = BeautifulSoup(html_body, "html.parser")
-        script_tags = soup.find_all("script", type="application/ld+json")
-        findings["json_ld_blocks_count"] = len(script_tags)
+        # Schema coverage is naturally site-wide (a site might only carry LocalBusiness markup
+        # on the homepage and Article/BlogPosting markup on posts), so unlike seo/security this
+        # unions schema types found across every scanned page rather than averaging per-page
+        # scores.
+        total_blocks, raw_schemas, parse_errors = self._extract_page_schemas(html_body)
+        pages_breakdown = [{
+            "url": self.site_url,
+            "json_ld_blocks": total_blocks,
+            "schema_types": sorted({str(s.get("@type")) for s in raw_schemas if s.get("@type")}),
+        }]
 
-        raw_schemas: list[dict[str, Any]] = []
-        parse_errors = []
-
-        for idx, tag in enumerate(script_tags):
-            content = tag.string or tag.get_text()
-            if not content.strip():
-                continue
+        def _analyze_one(args: tuple[str, httpx.Response]):
+            url, page_resp = args
+            if page_resp.status_code != 200:
+                return None
             try:
-                parsed = json.loads(content)
-                raw_schemas.extend(self._flatten_schemas(parsed))
+                p_blocks, p_schemas, p_errors = self._extract_page_schemas(page_resp.text)
+                return (url, p_blocks, p_schemas, p_errors)
             except Exception as exc:
-                parse_errors.append(f"Block #{idx+1}: Invalid JSON syntax ({exc})")
+                logger.debug("Schema per-page analysis failed for %s: %s", url, exc)
+                return None
+
+        other_pages = [(u, r) for u, r in self.shared_pages.items() if u != self.site_url]
+        for res in await self._run_in_threads(_analyze_one, other_pages):
+            if res is None:
+                continue
+            url, p_blocks, p_schemas, p_errors = res
+            total_blocks += p_blocks
+            raw_schemas.extend(p_schemas)
+            parse_errors.extend(p_errors)
+            pages_breakdown.append({
+                "url": url,
+                "json_ld_blocks": p_blocks,
+                "schema_types": sorted({str(s.get("@type")) for s in p_schemas if s.get("@type")}),
+            })
+
+        findings["json_ld_blocks_count"] = total_blocks
+        findings["total_pages_scanned"] = len(pages_breakdown)
+        findings["pages"] = pages_breakdown
 
         if parse_errors:
             findings["validation_errors"].extend(parse_errors)
@@ -133,7 +190,7 @@ class SchemaValidatorAuditor(BaseAuditor):
         base_points = min(100.0, len(valid_types_found) * 20.0)
         if len(valid_types_found) == 0:
             final_score = 0.0
-            issues.append("No structured data (JSON-LD) detected on homepage")
+            issues.append(f"No structured data (JSON-LD) detected across {len(pages_breakdown)} scanned page(s)")
         else:
             final_score = max(10.0, min(100.0, base_points - deductions))
 

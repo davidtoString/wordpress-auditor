@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ExternalLink,
@@ -13,7 +13,12 @@ import {
   ChevronLeft,
   ChevronRight,
   TrendingUp,
+  PauseCircle,
+  PlayCircle,
+  Trash2,
+  AlertCircle,
 } from 'lucide-react'
+import Modal from '../components/ui/Modal'
 import {
   LineChart,
   Line,
@@ -25,7 +30,7 @@ import {
 } from 'recharts'
 import { sites as sitesApi, audits as auditsApi } from '../lib/api'
 import { useAuth } from '../lib/auth'
-import type { ModuleResult } from '../lib/types'
+import type { ModuleResult, AuditScope } from '../lib/types'
 import ScoreBadge from '../components/ScoreBadge'
 import ModuleCard from '../components/ModuleCard'
 import AuditRunsTable from '../components/AuditRunsTable'
@@ -36,7 +41,10 @@ export const SiteDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>()
   const { isAdmin } = useAuth()
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [historyPage, setHistoryPage] = useState(1)
+  const [auditScope, setAuditScope] = useState<AuditScope>('quick')
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
 
   // 1. Fetch Site Info
   const {
@@ -65,9 +73,13 @@ export const SiteDetailPage: React.FC = () => {
 
   // 4. Trigger Audit Mutation
   const triggerMutation = useMutation({
-    mutationFn: () => sitesApi.triggerAudit(id!),
-    onSuccess: () => {
-      toast.success('Audit execution initiated!')
+    mutationFn: (scope: AuditScope) => sitesApi.triggerAudit(id!, scope),
+    onSuccess: (_data, scope) => {
+      toast.success(
+        scope === 'full'
+          ? 'Full site audit started — this can take a while, feel free to check back later.'
+          : 'Audit execution initiated!'
+      )
       queryClient.invalidateQueries({ queryKey: ['site', id] })
       queryClient.invalidateQueries({ queryKey: ['site-history', id] })
       queryClient.invalidateQueries({ queryKey: ['site-latest-audit', id] })
@@ -77,6 +89,43 @@ export const SiteDetailPage: React.FC = () => {
       toast.error(err.response?.data?.detail || 'Failed to trigger audit')
     },
   })
+
+  // 5. Toggle automated scheduled audits on/off
+  const toggleActiveMutation = useMutation({
+    mutationFn: (nextActive: boolean) => sitesApi.update(id!, { is_active: nextActive }),
+    onSuccess: (updatedSite) => {
+      toast.success(
+        updatedSite.is_active
+          ? 'Automated audits resumed for this site.'
+          : 'Automated audits paused — no scheduled audits will run until re-enabled.'
+      )
+      queryClient.invalidateQueries({ queryKey: ['site', id] })
+      queryClient.invalidateQueries({ queryKey: ['sites'] })
+    },
+    onError: (err: any) => {
+      toast.error(err.response?.data?.detail || 'Failed to update site')
+    },
+  })
+
+  // 6. Delete site
+  const deleteMutation = useMutation({
+    mutationFn: () => sitesApi.delete(id!),
+    onSuccess: () => {
+      toast.success('Site deleted.')
+      queryClient.invalidateQueries({ queryKey: ['sites'] })
+      navigate('/sites')
+    },
+    onError: (err: any) => {
+      toast.error(err.response?.data?.detail || 'Failed to delete site')
+      setShowDeleteConfirm(false)
+    },
+  })
+
+  const scopeOptions: { value: AuditScope; label: string }[] = [
+    { value: 'quick', label: 'Quick (Pages)' },
+    { value: 'with_posts', label: '+ Blog Posts' },
+    { value: 'full', label: 'Full Site (slow)' },
+  ]
 
   if (siteLoading) {
     return (
@@ -119,21 +168,6 @@ export const SiteDetailPage: React.FC = () => {
     }))
 
   // Extract module results safely
-  const defaultModules = [
-    'pagespeed',
-    'seo',
-    'security',
-    'broken_links',
-    'schema',
-    'cookie_consent',
-    'nap',
-    'images',
-    'wp_health',
-    'redirects',
-    'accessibility',
-    'uptime',
-  ]
-
   let moduleResultsList: ModuleResult[] = []
   if (latestAudit?.results) {
     if (Array.isArray(latestAudit.results)) {
@@ -146,19 +180,6 @@ export const SiteDetailPage: React.FC = () => {
     }
   }
 
-  // Ensure all 12 modules appear if audit run is active
-  const existingKeys = new Set(moduleResultsList.map((m) => m.module.toLowerCase()))
-  defaultModules.forEach((mKey) => {
-    if (!existingKeys.has(mKey) && latestAudit) {
-      moduleResultsList.push({
-        module: mKey,
-        score: latestAudit.score || 80,
-        status: (latestAudit.score || 80) >= 80 ? 'pass' : 'warn',
-        summary: `Standard diagnostic assessment passed for ${mKey}.`,
-      })
-    }
-  })
-
   return (
     <div className="space-y-8 pb-12">
       {/* Site Header Card */}
@@ -169,6 +190,12 @@ export const SiteDetailPage: React.FC = () => {
               {site.name}
             </h2>
             <ScoreBadge score={site.last_score} size="lg" showLabel />
+            {site.is_active === false && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-600">
+                <PauseCircle className="w-3.5 h-3.5" />
+                Automated audits paused
+              </span>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-4 text-xs text-slate-500 dark:text-slate-400">
@@ -191,35 +218,93 @@ export const SiteDetailPage: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
-          {isAdmin && (
-            <Link
-              to={`/sites/${id}/edit`}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-semibold rounded-xl text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-700/70 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
-            >
-              <Pencil className="w-4 h-4" />
-              Edit Site
-            </Link>
-          )}
-
-          <button
-            type="button"
-            onClick={() => triggerMutation.mutate()}
-            disabled={triggerMutation.isPending}
-            className="inline-flex items-center gap-2 px-5 py-2 text-sm font-semibold rounded-xl text-white bg-brand-600 hover:bg-brand-700 shadow-md shadow-brand-500/20 disabled:opacity-60 transition-all"
-          >
-            {triggerMutation.isPending ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Auditing...
-              </>
-            ) : (
-              <>
-                <Play className="w-4 h-4 fill-current" />
-                Audit Now
-              </>
+        <div className="flex flex-col items-end gap-2 shrink-0">
+          <div className="flex items-center gap-3">
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => toggleActiveMutation.mutate(site.is_active === false)}
+                disabled={toggleActiveMutation.isPending}
+                title={
+                  site.is_active === false
+                    ? 'Resume automated scheduled audits'
+                    : 'Pause automated scheduled audits (manual audits still work)'
+                }
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-semibold rounded-xl text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-700/70 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors disabled:opacity-60"
+              >
+                {toggleActiveMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : site.is_active === false ? (
+                  <PlayCircle className="w-4 h-4" />
+                ) : (
+                  <PauseCircle className="w-4 h-4" />
+                )}
+                {site.is_active === false ? 'Resume Audits' : 'Pause Audits'}
+              </button>
             )}
-          </button>
+
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-semibold rounded-xl text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+                Delete Site
+              </button>
+            )}
+
+            {isAdmin && (
+              <Link
+                to={`/sites/${id}/edit`}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-semibold rounded-xl text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-700/70 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+              >
+                <Pencil className="w-4 h-4" />
+                Edit Site
+              </Link>
+            )}
+
+            <div className="inline-flex rounded-xl border border-slate-200 dark:border-slate-700 p-0.5 bg-slate-50 dark:bg-slate-900/60">
+              {scopeOptions.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setAuditScope(opt.value)}
+                  className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+                    auditScope === opt.value
+                      ? 'bg-white dark:bg-slate-700 text-brand-600 dark:text-brand-400 shadow-sm'
+                      : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => triggerMutation.mutate(auditScope)}
+              disabled={triggerMutation.isPending}
+              className="inline-flex items-center gap-2 px-5 py-2 text-sm font-semibold rounded-xl text-white bg-brand-600 hover:bg-brand-700 shadow-md shadow-brand-500/20 disabled:opacity-60 transition-all"
+            >
+              {triggerMutation.isPending ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Auditing...
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4 fill-current" />
+                  Audit Now
+                </>
+              )}
+            </button>
+          </div>
+          {auditScope === 'full' && (
+            <p className="text-xs text-amber-600 dark:text-amber-400 max-w-xs text-right">
+              Scans every page and can take a long time — check back later.
+            </p>
+          )}
         </div>
       </div>
 
@@ -298,7 +383,7 @@ export const SiteDetailPage: React.FC = () => {
           <div>
             <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
               <LayoutGrid className="w-5 h-5 text-brand-500" />
-              Audit Modules Breakdown (12 Modules)
+              Audit Modules Breakdown
             </h3>
             <p className="text-xs text-slate-500">
               Detailed metrics across Core Web Vitals, SEO, Security, Links, and Compliance
@@ -325,7 +410,7 @@ export const SiteDetailPage: React.FC = () => {
               Trigger a manual audit or wait for the cron schedule to execute to inspect the 12 audit modules.
             </p>
             <button
-              onClick={() => triggerMutation.mutate()}
+              onClick={() => triggerMutation.mutate(auditScope)}
               disabled={triggerMutation.isPending}
               className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg text-white bg-brand-600 hover:bg-brand-700"
             >
@@ -390,6 +475,48 @@ export const SiteDetailPage: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Delete Confirmation Modal */}
+      <Modal
+        isOpen={showDeleteConfirm}
+        onClose={() => setShowDeleteConfirm(false)}
+        title="Confirm Delete Site"
+        description="This action cannot be undone. All audit histories for this site will be permanently removed."
+      >
+        <div className="space-y-4">
+          <div className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-800 dark:text-rose-300 flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            <div>
+              Are you sure you want to delete{' '}
+              <strong className="font-semibold text-rose-900 dark:text-rose-200">{site.name}</strong>{' '}
+              ({site.url})?
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2.5 pt-2">
+            <button
+              type="button"
+              onClick={() => setShowDeleteConfirm(false)}
+              className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => deleteMutation.mutate()}
+              disabled={deleteMutation.isPending}
+              className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 shadow-sm transition-colors flex items-center gap-1.5 disabled:opacity-60"
+            >
+              {deleteMutation.isPending ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="w-3.5 h-3.5" />
+              )}
+              Confirm Delete
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

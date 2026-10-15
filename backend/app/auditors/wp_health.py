@@ -27,7 +27,7 @@ class WpHealthAuditor(BaseAuditor):
         readme_url = f"{self.site_url}/readme.html"
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, verify=False) as client:
-                r_resp = await client.get(readme_url, headers=self.DEFAULT_HEADERS)
+                r_resp = await self._request(client, "GET", readme_url)
                 findings["readme_html_status"] = r_resp.status_code
                 if r_resp.status_code in (403, 404):
                     readme_blocked = True
@@ -50,13 +50,16 @@ class WpHealthAuditor(BaseAuditor):
         # Check homepage HTML for generator tag and debug errors
         homepage_html = ""
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
-                h_resp = await client.get(self.site_url, headers=self.DEFAULT_HEADERS)
-                homepage_html = h_resp.text
+            if self.shared_homepage is not None:
+                homepage_html = self.shared_homepage.text
+            else:
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
+                    h_resp = await self._request(client, "GET", self.site_url)
+                    homepage_html = h_resp.text
         except Exception as exc:
             logger.warning("WP Health failed fetching homepage: %s", exc)
 
-        soup = BeautifulSoup(homepage_html, "html.parser")
+        soup = BeautifulSoup(homepage_html, "lxml")
         gen_meta = soup.find("meta", attrs={"name": "generator"})
         if gen_meta and "wordpress" in gen_meta.get("content", "").lower():
             version_exposed = True
@@ -76,7 +79,7 @@ class WpHealthAuditor(BaseAuditor):
         author_url = f"{self.site_url}/?author=1"
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, verify=False) as client:
-                a_resp = await client.get(author_url, headers=self.DEFAULT_HEADERS)
+                a_resp = await self._request(client, "GET", author_url)
                 findings["author_enum_status"] = a_resp.status_code
                 if a_resp.is_redirect:
                     loc = a_resp.headers.get("Location", "")
@@ -91,22 +94,57 @@ class WpHealthAuditor(BaseAuditor):
         else:
             issues.append("Author enumeration vulnerability detected via /?author=1 redirect")
 
-        # 3. Debug Mode / PHP Error Disclosure Check (20 pts)
+        # 3. Debug Mode / PHP Error Disclosure Check (20 pts) — scanned across every target page,
+        # since a PHP warning/notice can easily surface on only one specific page (e.g. a plugin
+        # shortcode bug on one post) rather than the homepage.
         debug_indicators = ["WP_DEBUG", "Fatal error:", "Warning: ", "Notice: ", "Stack trace:"]
-        debug_found = [ind for ind in debug_indicators if ind in homepage_html]
-        findings["debug_strings_detected"] = debug_found
 
-        if not debug_found:
+        def _check_debug(html: str) -> list[str]:
+            return [ind for ind in debug_indicators if ind in html]
+
+        pages_with_debug: list[str] = []
+        pages_breakdown = [{"url": self.site_url, "debug_strings": _check_debug(homepage_html)}]
+        if pages_breakdown[0]["debug_strings"]:
+            pages_with_debug.append(self.site_url)
+
+        def _analyze_one(args: tuple[str, httpx.Response]):
+            url, page_resp = args
+            if page_resp.status_code != 200:
+                return None
+            try:
+                return (url, _check_debug(page_resp.text))
+            except Exception as exc:
+                logger.debug("WP Health per-page debug scan failed for %s: %s", url, exc)
+                return None
+
+        other_pages = [(u, r) for u, r in self.shared_pages.items() if u != self.site_url]
+        for res in await self._run_in_threads(_analyze_one, other_pages):
+            if res is None:
+                continue
+            url, page_debug = res
+            pages_breakdown.append({"url": url, "debug_strings": page_debug})
+            if page_debug:
+                pages_with_debug.append(url)
+
+        findings["debug_strings_detected"] = sorted({s for pb in pages_breakdown for s in pb["debug_strings"]})
+        findings["pages_with_debug_output"] = pages_with_debug
+        findings["total_pages_scanned"] = len(pages_breakdown)
+        findings["pages"] = pages_breakdown
+
+        if not pages_with_debug:
             score += 20.0
         else:
-            issues.append(f"PHP debug/error output detected on public pages ({', '.join(debug_found)})")
+            issues.append(
+                f"PHP debug/error output detected on {len(pages_with_debug)} page(s): "
+                f"{', '.join(pages_with_debug[:3])}"
+            )
 
         # 4. WP-Login Protection Check (10 pts)
         login_protected = False
         login_url = f"{self.site_url}/wp-login.php"
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, verify=False) as client:
-                l_resp = await client.get(login_url, headers=self.DEFAULT_HEADERS)
+                l_resp = await self._request(client, "GET", login_url)
                 findings["wp_login_status"] = l_resp.status_code
                 if l_resp.status_code in (403, 404):
                     login_protected = True
@@ -138,7 +176,7 @@ class WpHealthAuditor(BaseAuditor):
             try:
                 auth = httpx.BasicAuth(wp_user, wp_pass)
                 async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
-                    p_resp = await client.get(plugins_url, auth=auth, headers=self.DEFAULT_HEADERS)
+                    p_resp = await self._request(client, "GET", plugins_url, auth=auth)
                     if p_resp.status_code == 200:
                         plugins = p_resp.json()
                         findings["authenticated_plugins_count"] = len(plugins)
@@ -158,7 +196,7 @@ class WpHealthAuditor(BaseAuditor):
             api_url = f"{self.site_url}/wp-json/"
             try:
                 async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
-                    api_resp = await client.get(api_url, headers=self.DEFAULT_HEADERS)
+                    api_resp = await self._request(client, "GET", api_url)
                     if api_resp.status_code == 200:
                         api_data = api_resp.json()
                         namespaces = api_data.get("namespaces", [])

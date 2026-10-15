@@ -6,6 +6,7 @@ import type {
   SiteCreateInput,
   SiteUpdateInput,
   Audit,
+  AuditScope,
   ModuleResult,
   Settings,
   SchedulerJob
@@ -127,8 +128,20 @@ export const sites = {
     const response = await api.delete<{ message: string }>(`/sites/${id}`)
     return response.data
   },
-  async triggerAudit(id: string): Promise<Audit> {
-    const response = await api.post<Audit>(`/sites/${id}/audit`)
+  async testWpConnection(id: string): Promise<{ success: boolean; message: string }> {
+    const response = await api.post<{ success: boolean; message: string }>(
+      `/sites/${id}/test-wp-connection`
+    )
+    return response.data
+  },
+  async testPostmarkConnection(id: string): Promise<{ success: boolean; message: string }> {
+    const response = await api.post<{ success: boolean; message: string }>(
+      `/sites/${id}/test-postmark-connection`
+    )
+    return response.data
+  },
+  async triggerAudit(id: string, scope: AuditScope = 'quick'): Promise<Audit> {
+    const response = await api.post<Audit>(`/sites/${id}/audit`, { scope })
     return response.data
   },
   async getHistory(id: string, page?: number): Promise<{ audits: Audit[]; total?: number }> {
@@ -156,9 +169,24 @@ export const audits = {
     const response = await api.get<Audit>(`/audits/${id}`)
     return response.data
   },
+  async cancel(id: string): Promise<{ message: string }> {
+    const response = await api.post<{ message: string }>(`/audits/${id}/cancel`)
+    return response.data
+  },
   async getResults(id: string): Promise<Record<string, ModuleResult> | ModuleResult[]> {
     const response = await api.get<Record<string, ModuleResult> | ModuleResult[]>(`/audits/${id}/results`)
     return response.data
+  },
+  async exportReport(id: string, format: 'markdown' | 'json'): Promise<{ blob: Blob; filename: string }> {
+    const response = await api.get(`/audits/${id}/export`, {
+      params: { format },
+      responseType: 'blob',
+    })
+    const disposition: string = response.headers['content-disposition'] || ''
+    const match = disposition.match(/filename="?([^"]+)"?/)
+    const fallbackExt = format === 'json' ? 'json' : 'md'
+    const filename = match ? match[1] : `audit-${id.slice(0, 8)}.${fallbackExt}`
+    return { blob: response.data, filename }
   },
   async getLatest(siteId: string): Promise<Audit | null> {
     try {

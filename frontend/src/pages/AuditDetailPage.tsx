@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Download,
   Share2,
@@ -13,6 +13,10 @@ import {
   Check,
   Globe,
   LayoutGrid,
+  XCircle,
+  FileText,
+  FileJson,
+  ChevronDown,
 } from 'lucide-react'
 import { audits as auditsApi } from '../lib/api'
 import type { ModuleResult } from '../lib/types'
@@ -24,6 +28,21 @@ import toast from 'react-hot-toast'
 export const AuditDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>()
   const [copied, setCopied] = useState(false)
+  const [exportMenuOpen, setExportMenuOpen] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const queryClient = useQueryClient()
+
+  const cancelMutation = useMutation({
+    mutationFn: () => auditsApi.cancel(id!),
+    onSuccess: () => {
+      toast.success('Audit cancelled.')
+      queryClient.invalidateQueries({ queryKey: ['audit', id] })
+      queryClient.invalidateQueries({ queryKey: ['audits'] })
+    },
+    onError: (err: any) => {
+      toast.error(err.response?.data?.detail || 'Failed to cancel audit')
+    },
+  })
 
   const {
     data: audit,
@@ -33,6 +52,12 @@ export const AuditDetailPage: React.FC = () => {
     queryKey: ['audit', id],
     queryFn: () => auditsApi.get(id!),
     enabled: !!id,
+    // Poll while the audit is still running so the page updates on its own instead of
+    // requiring a manual refresh — important now that "full" scope audits can take a while.
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === 'running' || status === 'pending' ? 7000 : false
+    },
   })
 
   // Also query results if separate
@@ -53,25 +78,30 @@ export const AuditDetailPage: React.FC = () => {
     }
   }
 
-  const handleExport = () => {
-    if (!audit) return
-    const exportObject = {
-      ...audit,
-      exported_at: new Date().toISOString(),
-      report_url: window.location.href,
+  const handleExportReport = async (format: 'markdown' | 'json') => {
+    if (!id) return
+    setExportMenuOpen(false)
+    setExporting(true)
+    try {
+      const { blob, filename } = await auditsApi.exportReport(id, format)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+      toast.success(
+        format === 'markdown'
+          ? 'Markdown report downloaded — ready to hand to an AI agent for fixes'
+          : 'JSON report downloaded'
+      )
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || 'Failed to export report')
+    } finally {
+      setExporting(false)
     }
-    const blob = new Blob([JSON.stringify(exportObject, null, 2)], {
-      type: 'application/json',
-    })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `wp-audit-${audit.site_name || 'site'}-${audit.id.slice(0, 8)}.json`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(url)
-    toast.success('JSON Audit report downloaded')
   }
 
   if (auditLoading) {
@@ -112,29 +142,7 @@ export const AuditDetailPage: React.FC = () => {
     }))
   }
 
-  // If empty, generate standard 12 modules fallback
-  if (moduleList.length === 0) {
-    const defaultModules = [
-      'pagespeed',
-      'seo',
-      'security',
-      'broken_links',
-      'schema',
-      'cookie_consent',
-      'nap',
-      'images',
-      'wp_health',
-      'redirects',
-      'accessibility',
-      'uptime',
-    ]
-    moduleList = defaultModules.map((m) => ({
-      module: m,
-      score: audit.score || 85,
-      status: (audit.score || 85) >= 80 ? 'pass' : 'warn',
-      summary: `Automated diagnostic check completed for ${m}.`,
-    }))
-  }
+  const isInProgress = audit.status === 'running' || audit.status === 'pending'
 
   const formatDuration = (seconds?: number | null) => {
     if (seconds === null || seconds === undefined) return '—'
@@ -194,10 +202,35 @@ export const AuditDetailPage: React.FC = () => {
               <Clock className="w-3.5 h-3.5 text-slate-400" />
               Duration: {formatDuration(audit.duration_seconds)}
             </span>
+            {audit.scope && (
+              <>
+                <span>&bull;</span>
+                <span className="flex items-center gap-1">
+                  <LayoutGrid className="w-3.5 h-3.5 text-slate-400" />
+                  Scope: {audit.scope === 'quick' ? 'Quick (Pages)' : audit.scope === 'with_posts' ? '+ Blog Posts' : 'Full Site'}
+                </span>
+              </>
+            )}
           </div>
         </div>
 
         <div className="flex items-center gap-2.5 shrink-0">
+          {isInProgress && (
+            <button
+              type="button"
+              onClick={() => cancelMutation.mutate()}
+              disabled={cancelMutation.isPending}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs sm:text-sm font-semibold rounded-xl text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition-colors shadow-sm disabled:opacity-60"
+            >
+              {cancelMutation.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <XCircle className="w-4 h-4" />
+              )}
+              Cancel Audit
+            </button>
+          )}
+
           <button
             type="button"
             onClick={handleShare}
@@ -216,14 +249,48 @@ export const AuditDetailPage: React.FC = () => {
             )}
           </button>
 
-          <button
-            type="button"
-            onClick={handleExport}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl text-white bg-brand-600 hover:bg-brand-700 shadow-md shadow-brand-500/20 transition-all"
-          >
-            <Download className="w-4 h-4" />
-            Export JSON
-          </button>
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setExportMenuOpen((v) => !v)}
+              disabled={exporting}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl text-white bg-brand-600 hover:bg-brand-700 shadow-md shadow-brand-500/20 transition-all disabled:opacity-60"
+            >
+              {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              Export Report
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+
+            {exportMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setExportMenuOpen(false)} />
+                <div className="absolute right-0 mt-2 w-64 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg z-20 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => handleExportReport('markdown')}
+                    className="w-full flex items-start gap-2.5 px-4 py-3 text-left hover:bg-slate-50 dark:hover:bg-slate-700/60 transition-colors"
+                  >
+                    <FileText className="w-4 h-4 mt-0.5 text-brand-600 shrink-0" />
+                    <span>
+                      <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">Markdown (.md)</span>
+                      <span className="block text-xs text-slate-500 dark:text-slate-400">For handing to an AI agent to apply fixes</span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExportReport('json')}
+                    className="w-full flex items-start gap-2.5 px-4 py-3 text-left hover:bg-slate-50 dark:hover:bg-slate-700/60 transition-colors border-t border-slate-100 dark:border-slate-700"
+                  >
+                    <FileJson className="w-4 h-4 mt-0.5 text-brand-600 shrink-0" />
+                    <span>
+                      <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">JSON (.json)</span>
+                      <span className="block text-xs text-slate-500 dark:text-slate-400">Structured data for scripts/integrations</span>
+                    </span>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -260,15 +327,50 @@ export const AuditDetailPage: React.FC = () => {
             Audit Module Findings & Diagnostics
           </h3>
           <p className="text-xs text-slate-500">
-            Detailed scores and diagnostic logs recorded across all 12 modules during this execution
+            Detailed scores and diagnostic logs recorded across all audit modules during this execution
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-          {moduleList.map((result, idx) => (
-            <ModuleCard key={idx} moduleKey={result.module} result={result} />
-          ))}
-        </div>
+        {isInProgress ? (
+          <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200 dark:border-slate-700/80 p-12 text-center">
+            <Loader2 className="w-8 h-8 text-brand-600 animate-spin mx-auto mb-3" />
+            <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+              Audit in progress…
+            </h4>
+            <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
+              {audit.scope === 'full'
+                ? 'Full site audits scan every page and can take a long time. This page will update on its own — feel free to check back later.'
+                : 'This page will update automatically once the audit completes.'}
+            </p>
+            <button
+              type="button"
+              onClick={() => cancelMutation.mutate()}
+              disabled={cancelMutation.isPending}
+              className="inline-flex items-center gap-1.5 mt-4 px-4 py-2 text-xs font-semibold rounded-lg text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 disabled:opacity-60"
+            >
+              <XCircle className="w-3.5 h-3.5" />
+              Cancel Audit
+            </button>
+          </div>
+        ) : moduleList.length === 0 ? (
+          <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200 dark:border-slate-700/80 p-12 text-center">
+            <LayoutGrid className="w-8 h-8 text-slate-400 mx-auto mb-2" />
+            <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+              {audit.status === 'failed' ? 'Audit failed' : 'No module results recorded'}
+            </h4>
+            <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
+              {audit.status === 'failed'
+                ? 'This run did not complete successfully — no module data was recorded.'
+                : 'This audit run has no module results.'}
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {moduleList.map((result, idx) => (
+              <ModuleCard key={idx} moduleKey={result.module} result={result} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )

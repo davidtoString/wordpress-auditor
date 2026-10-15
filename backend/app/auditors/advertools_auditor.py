@@ -105,7 +105,7 @@ class AdvertoolsAuditor(BaseAuditor):
         errors: list[str] = []
 
         async with httpx.AsyncClient(timeout=12.0, verify=False, follow_redirects=True) as client:
-            resp = await client.get(robots_url, headers=self.DEFAULT_HEADERS)
+            resp = await self._request(client, "GET", robots_url)
 
         if resp.status_code != 200:
             return {
@@ -143,7 +143,7 @@ class AdvertoolsAuditor(BaseAuditor):
                 self.site_url + "/wp-login.php",
             ]
             user_agents = ["Googlebot", "Bingbot", "*"]
-            
+
             # adv.robotstxt_test returns a DataFrame or boolean mask
             try:
                 res_df = adv.robotstxt_test(
@@ -151,12 +151,31 @@ class AdvertoolsAuditor(BaseAuditor):
                     user_agents=user_agents,
                     urls=test_urls
                 )
-                return res_df.to_dict(orient="records")
+                fixed = res_df.to_dict(orient="records")
             except Exception as e:
                 logger.debug("adv.robotstxt_test error: %s", e)
-                return []
+                fixed = []
 
-        test_records = await asyncio.to_thread(_test_rules)
+            # The four generic paths above only catch common WP misconfigurations (blocking
+            # wp-admin, the whole site, etc.) — they say nothing about a site-specific rule
+            # (e.g. an accidental "Disallow: /blog/") that happens to block the real content
+            # pages this audit actually scanned. Test every scanned page against Googlebot
+            # specifically, capped to keep the rule-matching matrix bounded on full-scope audits
+            # with hundreds of pages.
+            scanned_urls = [u for u in self.shared_pages.keys() if u != self.site_url][:100]
+            scanned = []
+            if scanned_urls:
+                try:
+                    scanned_df = adv.robotstxt_test(
+                        robotstxt_url=robots_url, user_agents=["Googlebot"], urls=scanned_urls
+                    )
+                    scanned = scanned_df.to_dict(orient="records")
+                except Exception as e:
+                    logger.debug("adv.robotstxt_test (scanned pages) error: %s", e)
+
+            return fixed, scanned
+
+        test_records, scanned_records = await asyncio.to_thread(_test_rules)
 
         # Evaluate rules
         # Check if homepage is accidentally disallowed for Googlebot
@@ -164,21 +183,33 @@ class AdvertoolsAuditor(BaseAuditor):
             ua = rec.get("user_agent", "")
             url = rec.get("url_path", "")
             allowed = rec.get("can_fetch", True)
-            
+
             if (ua in ("Googlebot", "*")) and url == (self.site_url + "/") and not allowed:
                 errors.append(f"CRITICAL: Homepage is blocked for {ua} in robots.txt!")
                 penalty += 35
-            
+
             if (ua in ("Googlebot", "*")) and "wp-content/uploads" in url and not allowed:
                 warnings.append(f"Uploads directory is blocked for {ua}; may block image indexing")
                 penalty += 10
+
+        blocked_scanned_pages = sorted(
+            {rec.get("url_path") for rec in scanned_records if not rec.get("can_fetch", True)}
+        )
+        if blocked_scanned_pages:
+            penalty += min(25, len(blocked_scanned_pages) * 5)
+            errors.append(
+                f"{len(blocked_scanned_pages)} of the audited page(s) are blocked for Googlebot "
+                "by a robots.txt rule"
+            )
 
         return {
             "status": "ok",
             "url": robots_url,
             "sitemaps": sitemaps_in_robots,
-            "rules_checked": len(test_records),
+            "rules_checked": len(test_records) + len(scanned_records),
             "test_sample": test_records[:6],
+            "scanned_pages_checked": len(scanned_records),
+            "blocked_scanned_pages_for_googlebot": blocked_scanned_pages,
             "penalty": penalty,
             "findings": findings,
             "warnings": warnings,
@@ -187,48 +218,17 @@ class AdvertoolsAuditor(BaseAuditor):
 
     async def _analyze_sitemaps(self, candidate_sitemaps: list[str]) -> dict[str, Any]:
         """Download and analyze XML sitemaps recursively using advertools.sitemap_to_df."""
-        import advertools as adv
         import pandas as pd
+        from app.auditors.site_crawler import resolve_sitemap_dataframe
 
         penalty = 0
         findings: list[str] = []
         warnings: list[str] = []
         errors: list[str] = []
 
-        # Candidate sitemaps to try
-        urls_to_try = list(candidate_sitemaps)
-        standard_sitemaps = [
-            urljoin(self.site_url, "/sitemap_index.xml"),  # RankMath & Yoast default
-            urljoin(self.site_url, "/wp-sitemap.xml"),     # WP 5.5+ default
-            urljoin(self.site_url, "/sitemap.xml"),
-        ]
-        for sm in standard_sitemaps:
-            if sm not in urls_to_try:
-                urls_to_try.append(sm)
-
-        target_sitemap = None
-        # Check which sitemap actually responds with 200
-        async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True) as client:
-            for sm_url in urls_to_try:
-                try:
-                    r = await client.head(sm_url, headers=self.DEFAULT_HEADERS)
-                    if r.status_code == 200:
-                        target_sitemap = sm_url
-                        break
-                except Exception:
-                    continue
-
-        if not target_sitemap:
-            # Fallback check GET
-            async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True) as client:
-                for sm_url in urls_to_try[:2]:
-                    try:
-                        r = await client.get(sm_url, headers=self.DEFAULT_HEADERS)
-                        if r.status_code == 200 and ("xml" in r.headers.get("content-type", "") or "<sitemap" in r.text or "<urlset" in r.text):
-                            target_sitemap = sm_url
-                            break
-                    except Exception:
-                        continue
+        df, target_sitemap = await resolve_sitemap_dataframe(
+            self.site_url, candidate_sitemaps, self.DEFAULT_HEADERS
+        )
 
         if not target_sitemap:
             return {
@@ -239,18 +239,6 @@ class AdvertoolsAuditor(BaseAuditor):
                 "findings": [],
                 "warnings": [],
             }
-
-        # Run advertools sitemap parser
-        def _parse_sitemap():
-            try:
-                # sitemap_to_df automatically handles sitemap index recursion and gz compression!
-                df = adv.sitemap_to_df(target_sitemap)
-                return df
-            except Exception as e:
-                logger.warning("advertools sitemap_to_df exception: %s", e)
-                return None
-
-        df = await asyncio.to_thread(_parse_sitemap)
 
         if df is None or df.empty:
             return {
@@ -319,56 +307,117 @@ class AdvertoolsAuditor(BaseAuditor):
             "errors": errors,
         }
 
-    async def _analyze_serp_snippet(self) -> dict[str, Any]:
-        """Validate homepage title and description length against SERP display constraints."""
-        import advertools as adv
+    def _extract_title_meta(self, args: tuple[str, str]) -> dict[str, Any]:
+        """Pure, thread-safe per-page title/meta-description extraction + length check."""
         from bs4 import BeautifulSoup
 
-        penalty = 0
-        findings: list[str] = []
-        warnings: list[str] = []
-
-        async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True) as client:
-            resp = await client.get(self.site_url, headers=self.DEFAULT_HEADERS)
-        
-        if resp.status_code != 200:
-            return {}
-
-        soup = BeautifulSoup(resp.text, "html.parser")
+        url, html = args
+        soup = BeautifulSoup(html, "lxml")
         title_tag = soup.find("title")
         meta_desc = soup.find("meta", attrs={"name": "description"})
 
         title_text = title_tag.get_text().strip() if title_tag else ""
         desc_text = meta_desc.get("content", "").strip() if meta_desc else ""
-
         title_len = len(title_text)
         desc_len = len(desc_text)
 
+        issues: list[str] = []
+        penalty = 0.0
+
         # Google truncates titles > ~60 chars (~580px) and descriptions > ~160 chars
         if not title_text:
-            warnings.append("No title tag found on homepage")
+            issues.append("No title tag found")
             penalty += 10
         elif title_len > 60:
-            warnings.append(f"Title is {title_len} characters (likely truncated on Google SERP; recommended: 50-60 chars)")
+            issues.append(f"Title is {title_len} chars (likely truncated on Google SERP; recommended: 50-60)")
             penalty += 3
         elif title_len < 30:
-            warnings.append(f"Title is short ({title_len} chars); consider adding high-value keywords")
+            issues.append(f"Title is short ({title_len} chars); consider adding high-value keywords")
 
         if not desc_text:
-            warnings.append("No meta description tag found on homepage")
+            issues.append("No meta description tag found")
             penalty += 5
         elif desc_len > 160:
-            warnings.append(f"Meta description is {desc_len} characters (likely truncated on SERP; recommended: 120-155 chars)")
+            issues.append(f"Meta description is {desc_len} chars (likely truncated on SERP; recommended: 120-155)")
             penalty += 2
 
-        findings.append(f"SERP Preview: Title ({title_len} chars), Meta Description ({desc_len} chars)")
-
         return {
+            "url": url,
             "title": title_text,
             "title_length": title_len,
             "meta_description": desc_text,
             "description_length": desc_len,
+            "issues": issues,
             "penalty": penalty,
+        }
+
+    async def _analyze_serp_snippet(self) -> dict[str, Any]:
+        """Validate title/meta-description length across every scanned page (not just the
+        homepage), and flag exact-duplicate titles/descriptions across pages — a common real SEO
+        problem that's easy to catch once every page's values are in hand."""
+        findings: list[str] = []
+        warnings: list[str] = []
+
+        try:
+            if self.shared_homepage is not None:
+                home_resp = self.shared_homepage
+            else:
+                async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True) as client:
+                    home_resp = await self._request(client, "GET", self.site_url)
+            if home_resp.status_code != 200:
+                return {}
+        except Exception:
+            return {}
+
+        page_inputs: list[tuple[str, str]] = [(self.site_url, home_resp.text)]
+        for url, page_resp in self.shared_pages.items():
+            if url != self.site_url and page_resp.status_code == 200:
+                page_inputs.append((url, page_resp.text))
+
+        pages = await self._run_in_threads(self._extract_title_meta, page_inputs)
+
+        total_penalty = sum(p["penalty"] for p in pages) / len(pages)
+
+        # Duplicate detection across scanned pages
+        titles_seen: dict[str, list[str]] = {}
+        descs_seen: dict[str, list[str]] = {}
+        for p in pages:
+            if p["title"]:
+                titles_seen.setdefault(p["title"], []).append(p["url"])
+            if p["meta_description"]:
+                descs_seen.setdefault(p["meta_description"], []).append(p["url"])
+
+        duplicate_titles = {t: urls for t, urls in titles_seen.items() if len(urls) > 1}
+        duplicate_descriptions = {d: urls for d, urls in descs_seen.items() if len(urls) > 1}
+
+        if duplicate_titles:
+            warnings.append(f"{len(duplicate_titles)} title(s) duplicated across multiple pages")
+            total_penalty += min(20, len(duplicate_titles) * 5)
+        if duplicate_descriptions:
+            warnings.append(f"{len(duplicate_descriptions)} meta description(s) duplicated across multiple pages")
+            total_penalty += min(15, len(duplicate_descriptions) * 3)
+
+        for p in pages:
+            warnings.extend(f"{p['url']}: {issue}" for issue in p["issues"])
+
+        home = pages[0]
+        findings.append(
+            f"SERP Preview (homepage): Title ({home['title_length']} chars), "
+            f"Meta Description ({home['description_length']} chars)"
+        )
+        if len(pages) > 1:
+            findings.append(f"Checked title/meta length across {len(pages)} pages")
+
+        return {
+            "title": home["title"],
+            "title_length": home["title_length"],
+            "meta_description": home["meta_description"],
+            "description_length": home["description_length"],
+            "total_pages_checked": len(pages),
+            "pages": pages,
+            "duplicate_titles": {t: urls for t, urls in duplicate_titles.items()},
+            "duplicate_descriptions": {d: urls for d, urls in duplicate_descriptions.items()},
+            "penalty": round(total_penalty, 1),
             "findings": findings,
             "warnings": warnings,
         }

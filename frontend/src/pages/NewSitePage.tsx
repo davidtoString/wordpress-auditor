@@ -14,6 +14,9 @@ export const NewSitePage: React.FC = () => {
     mutationFn: (data: SiteCreateInput) => sitesApi.create(data),
     onSuccess: (newSite) => {
       toast.success(`Successfully registered site: ${newSite.name}`)
+      if (newSite.url_redirect_warning) {
+        toast(newSite.url_redirect_warning, { icon: '⚠️', duration: 12000 })
+      }
       queryClient.invalidateQueries({ queryKey: ['sites'] })
       navigate(`/sites/${newSite.id}`)
     },

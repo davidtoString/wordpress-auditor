@@ -19,6 +19,18 @@ REPORTS_BASE_DIR = Path("/app/reports")
 class UnlighthouseAuditor(BaseAuditor):
     """Site-wide multi-page auditing via Unlighthouse (Google Lighthouse on all discovered routes)."""
 
+    def __init__(
+        self,
+        site_url,
+        site,
+        shared_pages=None,
+        scope: str = "quick",
+        target_paths: list[str] | None = None,
+    ):
+        super().__init__(site_url, site, shared_pages)
+        self.scope = scope
+        self.target_paths = target_paths or ["/"]
+
     def _find_chrome_path(self) -> str:
         """Locate Playwright's installed Chromium executable or system Chrome."""
         custom_env = os.environ.get("CHROME_PATH")
@@ -61,17 +73,35 @@ class UnlighthouseAuditor(BaseAuditor):
         env["CHROME_PATH"] = chrome_path
         env["CHROME_FLAGS"] = "--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage"
 
+        # Installed unlighthouse-ci (0.17.10) has no --max-routes flag; passing one is silently
+        # ignored and it falls back to crawling the full sitemap, auditing every discovered page.
+        # For "quick"/"with_posts" we pass our own already-bounded page list explicitly via
+        # --urls (disabling its own sitemap/robots crawling so it stays exactly bounded to that
+        # set). "full" explicitly wants exhaustive coverage, so it's the one case where letting
+        # unlighthouse-ci crawl the site itself is correct — that's what --disable-sitemap and
+        # --disable-robots-txt exist to prevent otherwise.
         cmd = [
             "unlighthouse-ci",
             "--site", self.site_url,
             "--samples", "1",
-            "--max-routes", "8",
             "--reporter", "json",
             "--output-path", str(output_dir),
             "--cache", "false",
         ]
+        if self.scope == "full":
+            timeout_seconds = 1800.0  # 30 min ceiling; "full" is explicitly the slow, backgrounded tier
+        else:
+            cmd += ["--urls", ",".join(self.target_paths), "--disable-sitemap", "--disable-robots-txt"]
+            timeout_seconds = max(120.0, 20.0 * len(self.target_paths))
 
-        log_file_path = output_dir / "unlighthouse_run.log"
+        # Deliberately NOT inside output_dir: unlighthouse-ci wipes and recreates its own
+        # --output-path directory on startup, which unlinks a log file pre-opened inside it — our
+        # Python file handle keeps writing to the now-detached inode with no error, but nothing
+        # is left on disk once the subprocess exits and the file closes. Confirmed reproducible:
+        # every past failure's captured "stderr" was silently empty because of this, not because
+        # nothing was written. Writing alongside output_dir instead of inside it survives whatever
+        # unlighthouse-ci does to its own folder.
+        log_file_path = REPORTS_BASE_DIR / f"{safe_domain}_unlighthouse_run.log"
         logger.info("Executing Unlighthouse scan for %s...", self.site_url)
         proc = None
         timed_out = False
@@ -84,7 +114,7 @@ class UnlighthouseAuditor(BaseAuditor):
                     env=env,
                     start_new_session=True,
                 )
-                await asyncio.wait_for(proc.wait(), timeout=120.0)
+                await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             timed_out = True
             if proc:
@@ -92,7 +122,10 @@ class UnlighthouseAuditor(BaseAuditor):
                     proc.kill()
                 except Exception:
                     pass
-            logger.warning("Unlighthouse scan timed out for %s (120s limit)", self.site_url)
+            logger.warning(
+                "Unlighthouse scan timed out for %s (%.0fs limit, scope=%s)",
+                self.site_url, timeout_seconds, self.scope,
+            )
         except Exception as exc:
             logger.error("Failed to run unlighthouse-ci: %s", exc)
             return AuditModuleResult(
@@ -112,7 +145,12 @@ class UnlighthouseAuditor(BaseAuditor):
                 ci_result_path = candidates[0]
 
         if not ci_result_path.exists():
-            stderr_text = stderr.decode(errors="ignore") if stderr else ""
+            try:
+                stderr_text = log_file_path.read_text(errors="ignore")
+            except OSError:
+                stderr_text = ""
+            if timed_out:
+                stderr_text = f"Timed out after {timeout_seconds:.0f}s.\n{stderr_text}"
             logger.warning("Unlighthouse did not generate ci-result.json: %s", stderr_text[:300])
             return AuditModuleResult(
                 module="unlighthouse",
@@ -166,8 +204,10 @@ class UnlighthouseAuditor(BaseAuditor):
             seo_sum += s
             overall_sum += ov
 
+            route_path = r.get("path", "/")
             processed_routes.append({
-                "path": r.get("path", "/"),
+                "path": route_path,
+                "url": self.site_url + (route_path if route_path.startswith("/") else f"/{route_path}"),
                 "score": ov,
                 "performance": p,
                 "accessibility": a,
@@ -205,6 +245,8 @@ class UnlighthouseAuditor(BaseAuditor):
                     "overall": final_score,
                 },
                 "routes": processed_routes,
+                "pages": processed_routes,  # alias for the frontend's generic per-page view
+                "scope": self.scope,
                 "report_url": report_url,
             },
         )

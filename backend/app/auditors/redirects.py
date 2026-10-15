@@ -126,7 +126,7 @@ class RedirectsAuditor(BaseAuditor):
             if len(urls_to_test) < 5:
                 try:
                     home_resp = await client.get(self.site_url, follow_redirects=True, headers=self.DEFAULT_HEADERS)
-                    soup = BeautifulSoup(home_resp.text, "html.parser")
+                    soup = BeautifulSoup(home_resp.text, "lxml")
                     for a in soup.find_all("a", href=True):
                         href = a["href"].strip()
                         if href.startswith("/") or origin_domain in href:

@@ -22,9 +22,12 @@ export interface Site {
   name: string
   url: string
   cron_schedule: string
-  notification_email?: string | null
+  notify_email?: string | null
   wp_username?: string | null
   wp_app_password?: string | null
+  wp_app_password_configured?: boolean
+  postmark_server_token?: string | null
+  postmark_token_configured?: boolean
   nap_name?: string | null
   nap_address?: string | null
   nap_phone?: string | null
@@ -33,15 +36,17 @@ export interface Site {
   last_score?: number | null
   created_at: string
   updated_at?: string
+  url_redirect_warning?: string | null
 }
 
 export interface SiteCreateInput {
   name: string
   url: string
   cron_schedule?: string
-  notification_email?: string | null
+  notify_email?: string | null
   wp_username?: string | null
   wp_app_password?: string | null
+  postmark_server_token?: string | null
   nap_name?: string | null
   nap_address?: string | null
   nap_phone?: string | null
@@ -50,7 +55,9 @@ export interface SiteCreateInput {
 
 export interface SiteUpdateInput extends Partial<SiteCreateInput> {}
 
-export type AuditStatus = 'running' | 'completed' | 'failed' | 'pending'
+export type AuditStatus = 'running' | 'completed' | 'failed' | 'pending' | 'cancelled'
+
+export type AuditScope = 'quick' | 'with_posts' | 'full'
 
 export interface ModuleResult {
   module: string
@@ -70,6 +77,7 @@ export interface Audit {
   status: AuditStatus
   score: number | null
   triggered_by: string
+  scope: AuditScope
   started_at: string
   completed_at?: string | null
   duration_seconds?: number | null
@@ -78,15 +86,25 @@ export interface Audit {
 }
 
 export interface Settings {
-  openai_api_key?: string
-  gemini_api_key?: string
-  ai_provider?: 'openai' | 'gemini'
-  google_pagespeed_api_key?: string
-  resend_api_key?: string
-  resend_from_email?: string
-  resend_from_name?: string
-  alert_email?: string
-  score_alert_threshold?: number
+  // These match the backend's actual field names exactly (uppercase, like the .env vars they
+  // mirror) — GET returns the current value already masked (e.g. "sk-1...bcd3") when configured,
+  // or "" when not. Never pre-fill an editable input from these; use the *_configured flags to
+  // show a "currently saved" indicator instead, and only send a field on save if the admin
+  // actually typed a new value — otherwise omit it so the saved one isn't overwritten with blank.
+  OPENAI_API_KEY?: string
+  GEMINI_API_KEY?: string
+  AI_PROVIDER?: 'openai' | 'gemini'
+  GOOGLE_PAGESPEED_API_KEY?: string
+  RESEND_API_KEY?: string
+  RESEND_FROM_EMAIL?: string
+  RESEND_FROM_NAME?: string
+  ALERT_EMAIL?: string
+  FRONTEND_URL?: string
+  DEBUG?: boolean
+  openai_configured?: boolean
+  gemini_configured?: boolean
+  resend_configured?: boolean
+  pagespeed_configured?: boolean
 }
 
 export interface SchedulerJob {

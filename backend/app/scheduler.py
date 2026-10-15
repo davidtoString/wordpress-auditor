@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 import uuid
 
+import httpx
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.orm import Session
 
 from app.ai.summarizer import generate_audit_summary
+from app.auditors.base import BaseAuditor
+from app.auditors.site_crawler import discover_target_pages
 from app.auditors.advertools_auditor import AdvertoolsAuditor
+from app.auditors.contact_forms import ContactFormsAuditor
 from app.auditors.cookies import CookiesAuditor
 from app.auditors.images import ImagesAuditor
 from app.auditors.links import LinksAuditor
@@ -35,6 +41,52 @@ logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler()
 
+# In-memory registry of currently-executing audit tasks, keyed by audit_run_id (as a string),
+# so a running audit can actually be cancelled rather than only ever running to completion or
+# failure. This is process-local: a backend restart loses the registry (the task is killed along
+# with the process anyway), which is why mark_orphaned_runs_as_failed() exists below — any
+# AuditRun left "running" after a restart is not actually running anymore, just abandoned.
+_RUNNING_AUDIT_TASKS: dict[str, asyncio.Task] = {}
+
+
+def dispatch_audit(site_id_str: str, triggered_by: str, scope: str) -> uuid.UUID:
+    """Start an audit run as a trackable asyncio Task (instead of FastAPI's fire-and-forget
+    BackgroundTasks) and register it so it can be cancelled later. Returns the new audit_run_id
+    immediately, before the audit itself has done any work."""
+    audit_run_id = uuid.uuid4()
+    task = asyncio.create_task(execute_site_audit(site_id_str, triggered_by, scope, audit_run_id))
+    _RUNNING_AUDIT_TASKS[str(audit_run_id)] = task
+    task.add_done_callback(lambda _t: _RUNNING_AUDIT_TASKS.pop(str(audit_run_id), None))
+    return audit_run_id
+
+
+def cancel_audit_task(audit_run_id: str) -> bool:
+    """Cancel a currently-running audit if this process actually has a live task for it. Returns
+    False if no such task is tracked (already finished, or orphaned from a prior process/restart
+    — the caller should fall back to just marking the DB row directly in that case)."""
+    task = _RUNNING_AUDIT_TASKS.get(audit_run_id)
+    if task and not task.done():
+        task.cancel()
+        return True
+    return False
+
+
+def mark_orphaned_runs_as_failed(db: Session) -> None:
+    """Called once at startup. Any AuditRun still 'running' or 'pending' at this point cannot
+    actually be running — the process that was executing it is gone (restart, crash, deploy) —
+    so it would otherwise stay stuck forever, looking like a perpetually in-progress audit."""
+    try:
+        stuck = db.query(AuditRun).filter(AuditRun.status.in_(["running", "pending"])).all()
+        for run in stuck:
+            run.status = "failed"
+            run.error_message = "Interrupted by a server restart before the audit finished."
+            run.completed_at = datetime.now(timezone.utc)
+        if stuck:
+            db.commit()
+            logger.warning("Marked %d orphaned audit run(s) as failed on startup", len(stuck))
+    except Exception as exc:
+        logger.error("Failed marking orphaned audit runs: %s", exc)
+
 # Module weights for overall score calculation
 MODULE_WEIGHTS = {
     "unlighthouse": 0.20,
@@ -48,8 +100,15 @@ MODULE_WEIGHTS = {
 }
 
 
+APP_TIMEZONE = "America/Mexico_City"
+
+
 def _parse_cron_trigger(cron_str: str) -> CronTrigger:
-    """Parse a standard 5-part cron expression string into an APScheduler CronTrigger."""
+    """Parse a standard 5-part cron expression string into an APScheduler CronTrigger.
+
+    Interpreted in APP_TIMEZONE rather than UTC/server-local, so a schedule like "0 6 * * *"
+    reliably means 6am Mexico City time for the site owner regardless of what timezone the host
+    machine happens to be running in."""
     parts = cron_str.strip().split()
     if len(parts) == 5:
         minute, hour, day, month, day_of_week = parts
@@ -59,9 +118,9 @@ def _parse_cron_trigger(cron_str: str) -> CronTrigger:
             day=day,
             month=month,
             day_of_week=day_of_week,
-            timezone="UTC",
+            timezone=APP_TIMEZONE,
         )
-    return CronTrigger.from_crontab(cron_str)
+    return CronTrigger.from_crontab(cron_str, timezone=APP_TIMEZONE)
 
 
 def schedule_site_audit(site: Site) -> None:
@@ -105,18 +164,27 @@ def trigger_scheduled_audit(site_id_str: str) -> None:
         logger.error("Error running scheduled audit for site %s: %s", site_id_str, exc)
 
 
-async def execute_site_audit(site_id_str: str, triggered_by: str = "manual") -> AuditRun | None:
+async def execute_site_audit(
+    site_id_str: str,
+    triggered_by: str = "manual",
+    scope: str = "quick",
+    audit_run_id: uuid.UUID | None = None,
+) -> AuditRun | None:
     """Core asynchronous audit execution pipeline:
     1. Create AuditRun record (status=running)
-    2. Run all auditors concurrently
-    3. Save AuditResult records to DB
-    4. Calculate overall weighted score
-    5. Generate AI summary
-    6. Update AuditRun record
-    7. Dispatch alert/completion emails
+    2. Discover target pages for the requested scope and share one fetch of each across modules
+    3. Run all auditors concurrently
+    4. Save AuditResult records to DB
+    5. Calculate overall weighted score
+    6. Generate AI summary
+    7. Update AuditRun record
+    8. Dispatch alert/completion emails
+
+    `scope` is one of "quick" (homepage + WordPress Pages, bounded), "with_posts" (quick + a
+    bounded sample of blog posts), or "full" (every discovered URL, no cap — explicitly slow).
     """
     db: Session = SessionLocal()
-    audit_run_id = uuid.uuid4()
+    audit_run_id = audit_run_id or uuid.uuid4()
     site_uuid = uuid.UUID(site_id_str) if isinstance(site_id_str, str) else site_id_str
 
     try:
@@ -132,28 +200,85 @@ async def execute_site_audit(site_id_str: str, triggered_by: str = "manual") -> 
             site_id=site.id,
             status="running",
             triggered_by=triggered_by,
+            scope=scope,
             started_at=now_utc,
             created_at=now_utc,
         )
         db.add(audit_run)
         db.commit()
         db.refresh(audit_run)
-        logger.info("Started audit run %s for site %s (%s)", audit_run.id, site.name, site.url)
+        logger.info(
+            "Started audit run %s for site %s (%s), scope=%s",
+            audit_run.id, site.name, site.url, scope,
+        )
 
-        # 2. Instantiate and run all 12 auditor modules concurrently
+        # 1b. Discover the target page set for this scope, then fetch each ONCE and share it with
+        # every module that just needs HTML/headers (seo, security, schema, images, wp_health,
+        # links), instead of each independently re-fetching the identical pages. Bounded
+        # concurrency + jitter (same pattern as links.py) to avoid tripping the site's own
+        # WAF/rate-limiter now that we may be hitting many more than one page. Falls back to
+        # homepage-only (today's original behavior) if sitemap discovery fails entirely; modules
+        # with genuinely different needs (pagespeed's timing samples, redirects' manual
+        # hop-by-hop tracing, cookies' Playwright navigation) are unaffected either way.
+        crawl = await discover_target_pages(site.url, scope, headers=BaseAuditor.DEFAULT_HEADERS)
+        if crawl.crawl_error:
+            logger.info(
+                "Site crawl for %s (scope=%s) fell back to homepage only: %s",
+                site.url, scope, crawl.crawl_error,
+            )
+        logger.info(
+            "Scope %s for %s: %d target page(s) (%d pages, %d posts discovered)",
+            scope, site.url, len(crawl.target_urls), len(crawl.pages), len(crawl.posts),
+        )
+
+        shared_pages: dict[str, httpx.Response] = {}
+        fetch_sem = asyncio.Semaphore(5)
+
+        async def _fetch_one(client: httpx.AsyncClient, url: str) -> None:
+            async with fetch_sem:
+                await asyncio.sleep(random.uniform(0.05, 0.25))
+                try:
+                    shared_pages[url] = await client.get(url, headers=BaseAuditor.DEFAULT_HEADERS)
+                except Exception as exc:
+                    logger.warning("Shared page pre-fetch failed for %s: %s", url, exc)
+
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0, connect=8.0), follow_redirects=True, verify=False
+        ) as client:
+            await asyncio.gather(*[_fetch_one(client, u) for u in crawl.target_urls])
+
+        # Relative paths (for Unlighthouse's --urls flag) derived from the same target set.
+        # Parsed per-URL via urlparse rather than naively slicing off len(site.url) — a site
+        # that redirects bare-domain to www (or http to https) returns sitemap URLs on a
+        # *different* origin than site.url itself, and slicing by a fixed length computed from
+        # the wrong origin produces a garbage mid-string fragment (e.g. "ing.com/some-page"
+        # instead of "/some-page"), which unlighthouse-ci's own URL parsing then rejects outright
+        # ("Invalid URL") — confirmed reproducible on a site configured without "www." whose
+        # sitemap lives under "www.".
+        target_paths = sorted(
+            {(urlparse(u).path or "/") for u in crawl.target_urls}
+        )
+
+        # 2. Instantiate and run all 13 auditor modules concurrently. `fetch_sem` (used above for
+        # the shared page pre-fetch) is also handed to every module as its request budget for any
+        # *extra* requests it makes beyond shared_pages (robots.txt, xmlrpc.php, REST API probes,
+        # etc.) — one shared budget for the whole run, not one per module independently, so the
+        # site being audited sees a bounded request rate overall instead of ~13 modules' worth of
+        # "reasonable" concurrency stacking up into a burst big enough to trip its rate-limiter.
         auditors = [
-            UnlighthouseAuditor(site.url, site),
-            AdvertoolsAuditor(site.url, site),
+            UnlighthouseAuditor(site.url, site, scope=scope, target_paths=target_paths),
+            AdvertoolsAuditor(site.url, site, shared_pages, fetch_sem),
             PageSpeedAuditor(site.url, site),
-            SeoAuditor(site.url, site),
-            SecurityAuditor(site.url, site),
-            LinksAuditor(site.url, site),
-            SchemaValidatorAuditor(site.url, site),
+            SeoAuditor(site.url, site, shared_pages, fetch_sem),
+            SecurityAuditor(site.url, site, shared_pages, fetch_sem),
+            LinksAuditor(site.url, site, shared_pages, fetch_sem),
+            SchemaValidatorAuditor(site.url, site, shared_pages),
             CookiesAuditor(site.url, site),
-            ImagesAuditor(site.url, site),
-            NapAuditor(site.url, site),
-            WpHealthAuditor(site.url, site),
+            ImagesAuditor(site.url, site, shared_pages, fetch_sem),
+            NapAuditor(site.url, site, request_semaphore=fetch_sem),
+            WpHealthAuditor(site.url, site, shared_pages, fetch_sem),
             RedirectsAuditor(site.url, site),
+            ContactFormsAuditor(site.url, site, shared_pages, fetch_sem),
         ]
 
         # Execute all auditors with exception shield so one auditor failure doesn't crash the rest
@@ -272,6 +397,18 @@ async def execute_site_audit(site_id_str: str, triggered_by: str = "manual") -> 
         )
         return audit_run
 
+    except asyncio.CancelledError:
+        logger.info("Audit run %s was cancelled by the user", audit_run_id)
+        try:
+            run_rec = db.query(AuditRun).filter(AuditRun.id == audit_run_id).first()
+            if run_rec:
+                run_rec.status = "cancelled"
+                run_rec.error_message = "Cancelled by user"
+                run_rec.completed_at = datetime.now(timezone.utc)
+                db.commit()
+        except Exception:
+            pass
+        raise
     except Exception as exc:
         logger.error("Audit run %s failed with exception: %s", audit_run_id, exc, exc_info=True)
         try:
