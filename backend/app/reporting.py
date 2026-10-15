@@ -14,6 +14,7 @@ MODULE_TITLES: dict[str, str] = {
     "wp_health": "WordPress Health & Hardening",
     "nap": "NAP Consistency (Name/Address/Phone)",
     "contact_forms": "Contact Forms",
+    "tracking_scripts": "Tracking & Analytics Scripts",
     "cookies": "Cookie Consent / GDPR",
     "redirects": "Redirects & Canonicalization",
     "pagespeed": "Page Speed (Google PageSpeed Insights)",
@@ -156,6 +157,16 @@ def _module_highlights(module: str, details: dict[str, Any]) -> dict[str, Any]:
             highlights["inactive_plugins"] = details["inactive_plugins"]
         if details.get("wp_login_protected") is False:
             highlights["wp_login_unprotected"] = True
+        if details.get("too_many_active_plugins"):
+            highlights["too_many_active_plugins"] = details["too_many_active_plugins"]
+        if details.get("installed_plugins"):
+            highlights["installed_plugins"] = details["installed_plugins"]
+            if details.get("plugin_count_source") == "inferred_from_assets":
+                highlights["installed_plugins_note"] = (
+                    "Inferred from front-end asset URLs — no WP Application Password is "
+                    "configured for this site, so inactive plugins and any plugin with no "
+                    "front-end assets won't appear here; treat this count as a lower bound."
+                )
 
     elif module == "nap":
         if details.get("issues"):
@@ -189,6 +200,16 @@ def _module_highlights(module: str, details: dict[str, Any]) -> dict[str, Any]:
     elif module == "redirects":
         if details.get("canonical_issues_count"):
             highlights["canonical_issues_count"] = details["canonical_issues_count"]
+
+    elif module == "tracking_scripts":
+        if details.get("detected"):
+            highlights["detected_tracking_scripts"] = details["detected"]
+        else:
+            highlights["no_tracking_scripts_detected"] = True
+        if details.get("other_third_party_scripts"):
+            highlights["other_third_party_scripts"] = details["other_third_party_scripts"]
+        if details.get("wp_tracking_plugins_detected"):
+            highlights["wp_tracking_plugins_detected"] = details["wp_tracking_plugins_detected"]
 
     return highlights
 

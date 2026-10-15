@@ -68,8 +68,8 @@ const MODULE_HELP: Record<string, { what: string; howToFix: string }> = {
     howToFix: 'Update either the site\'s NAP configuration (in the Edit Site form) or the actual page content so they match exactly, including formatting.',
   },
   wp_health: {
-    what: 'Core WordPress hardening: version disclosure, user enumeration, debug/error output exposed publicly, wp-login.php protection, and REST API/plugin status.',
-    howToFix: 'Hide version info and block user enumeration via a security plugin. PHP debug output appearing publicly means WP_DEBUG_DISPLAY is on in production — turn it off in wp-config.php.',
+    what: 'Core WordPress hardening: version disclosure, user enumeration, debug/error output exposed publicly, wp-login.php protection, and installed plugins — with a full plugin list and a flag when the site is running an unusually large number of active plugins.',
+    howToFix: 'Hide version info and block user enumeration via a security plugin. PHP debug output appearing publicly means WP_DEBUG_DISPLAY is on in production — turn it off in wp-config.php. For a high plugin count, audit the list below and remove or consolidate ones that aren\'t earning their keep — each one adds load time, attack surface, and update/compatibility risk.',
   },
   redirects: {
     what: 'HTTP-to-HTTPS redirect behavior and response headers on key URLs.',
@@ -78,6 +78,10 @@ const MODULE_HELP: Record<string, { what: string; howToFix: string }> = {
   contact_forms: {
     what: 'Checks that a real, correctly-built contact form exists on the homepage and the Contact page, and (if a Postmark server token is configured) whether the site has sent any transactional email recently — without ever submitting a test message itself.',
     howToFix: 'A missing form means adding one with your form builder (Elementor, Contact Form 7, WPForms, etc.) to that page. No recent Postmark activity is inconclusive on its own — configure a Postmark server token in Edit Site to get a real signal, and verify a real submission arrives in your inbox at least once.',
+  },
+  tracking_scripts: {
+    what: 'Inventories every analytics, advertising pixel, call-tracking, heatmap, and chat-widget script loaded on the site — Google Analytics/Tag Manager, Meta Pixel, Google Ads, CallRail, Hotjar, etc. — and flags missing tracking, deprecated Universal Analytics, likely duplicate installs, and tracking present on some scanned pages but not others.',
+    howToFix: 'Add or fix tracking via whichever plugin manages it (Site Kit, GTM4WP, MonsterInsights, etc. — see "Likely Source" below) or the theme/Elementor custom-code area it was hardcoded into. Remove duplicate or legacy (Universal Analytics) installs rather than leaving them running alongside the replacement.',
   },
 }
 

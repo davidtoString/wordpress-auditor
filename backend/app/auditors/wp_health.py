@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html as html_lib
 import logging
 import re
 from typing import Any
@@ -9,6 +10,17 @@ from bs4 import BeautifulSoup
 from app.auditors.base import BaseAuditor, AuditModuleResult
 
 logger = logging.getLogger(__name__)
+
+# Used only for the unauthenticated fallback plugin count (no WP Application Password
+# configured): infers a lower-bound plugin list from front-end asset URLs referenced in scanned
+# pages' HTML. Misses inactive plugins and any plugin that enqueues no front-end asset, but still
+# gives a useful signal without requiring WordPress credentials.
+PLUGIN_SLUG_PATTERN = re.compile(r"/wp-content/(?:plugins|mu-plugins)/([a-z0-9][a-z0-9\-]*)/", re.I)
+
+# Above this many *active* plugins, flag it as worth auditing/trimming (page-load overhead,
+# attack surface, update/compatibility risk all scale with plugin count).
+PLUGIN_COUNT_WARN_THRESHOLD = 25
+PLUGIN_COUNT_HIGH_THRESHOLD = 40
 
 
 class WpHealthAuditor(BaseAuditor):
@@ -179,13 +191,43 @@ class WpHealthAuditor(BaseAuditor):
                     p_resp = await self._request(client, "GET", plugins_url, auth=auth)
                     if p_resp.status_code == 200:
                         plugins = p_resp.json()
+                        active = [p for p in plugins if p.get("status") == "active"]
+                        inactive = [p for p in plugins if p.get("status") == "inactive"]
                         findings["authenticated_plugins_count"] = len(plugins)
-                        inactive = [p.get("name") for p in plugins if p.get("status") == "inactive"]
-                        findings["inactive_plugins"] = inactive
+                        findings["active_plugins_count"] = len(active)
+                        findings["inactive_plugins"] = [p.get("name") for p in inactive]
+                        findings["plugin_count_source"] = "authenticated"
+                        findings["installed_plugins"] = sorted(
+                            (
+                                {
+                                    "name": html_lib.unescape(p.get("name") or p.get("plugin") or "Unknown"),
+                                    "version": p.get("version"),
+                                    "status": p.get("status"),
+                                }
+                                for p in plugins
+                            ),
+                            key=lambda p: (p["status"] != "active", p["name"].lower()),
+                        )
                         api_score = 30.0
                         if len(inactive) > 5:
                             api_score -= 5.0
                             issues.append(f"{len(inactive)} inactive plugins found on site")
+                        if len(active) > PLUGIN_COUNT_HIGH_THRESHOLD:
+                            api_score -= 8.0
+                            findings["too_many_active_plugins"] = len(active)
+                            issues.append(
+                                f"{len(active)} active plugins installed — this is a lot. Each one "
+                                "adds page-load overhead, security attack surface, and "
+                                "update/compatibility risk; audit for ones that aren't earning "
+                                "their keep"
+                            )
+                        elif len(active) > PLUGIN_COUNT_WARN_THRESHOLD:
+                            api_score -= 4.0
+                            findings["too_many_active_plugins"] = len(active)
+                            issues.append(
+                                f"{len(active)} active plugins installed — on the high side; "
+                                "consider auditing for ones that can be consolidated or removed"
+                            )
                     else:
                         api_score = 15.0
             except Exception as p_exc:
@@ -208,6 +250,39 @@ class WpHealthAuditor(BaseAuditor):
                         api_score = 15.0
             except Exception:
                 api_score = 15.0
+
+            # No WP Application Password configured, so the authenticated plugin list above
+            # isn't available — infer a lower-bound plugin list from front-end asset URLs across
+            # every page already fetched for this audit instead of making extra requests.
+            plugin_slugs: set[str] = set()
+            plugin_slugs.update(PLUGIN_SLUG_PATTERN.findall(homepage_html))
+            for page_url, page_resp in self.shared_pages.items():
+                if page_url == self.site_url or page_resp.status_code != 200:
+                    continue
+                plugin_slugs.update(PLUGIN_SLUG_PATTERN.findall(page_resp.text))
+
+            if plugin_slugs:
+                findings["plugin_count_source"] = "inferred_from_assets"
+                findings["inferred_active_plugin_count"] = len(plugin_slugs)
+                findings["installed_plugins"] = sorted(
+                    ({"name": slug, "version": None, "status": "detected"} for slug in plugin_slugs),
+                    key=lambda p: p["name"],
+                )
+                if len(plugin_slugs) > PLUGIN_COUNT_HIGH_THRESHOLD:
+                    findings["too_many_active_plugins"] = len(plugin_slugs)
+                    issues.append(
+                        f"At least {len(plugin_slugs)} plugins detected from front-end asset URLs "
+                        "— already a lot, and this is a lower bound since no WP Application "
+                        "Password is configured (inactive plugins and ones with no front-end "
+                        "assets aren't visible here). Add WP credentials in Edit Site for an "
+                        "accurate, complete count."
+                    )
+                elif len(plugin_slugs) > PLUGIN_COUNT_WARN_THRESHOLD:
+                    issues.append(
+                        f"At least {len(plugin_slugs)} plugins detected from front-end asset URLs "
+                        "— on the high side. Add WP Application Password credentials in Edit Site "
+                        "for an accurate, complete count."
+                    )
 
         score += api_score
 

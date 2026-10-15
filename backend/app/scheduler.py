@@ -27,6 +27,7 @@ from app.auditors.redirects import RedirectsAuditor
 from app.auditors.schema_validator import SchemaValidatorAuditor
 from app.auditors.security import SecurityAuditor
 from app.auditors.seo import SeoAuditor
+from app.auditors.tracking_scripts import TrackingScriptsAuditor
 from app.auditors.unlighthouse import UnlighthouseAuditor
 from app.auditors.wp_health import WpHealthAuditor
 from app.config import settings
@@ -259,7 +260,7 @@ async def execute_site_audit(
             {(urlparse(u).path or "/") for u in crawl.target_urls}
         )
 
-        # 2. Instantiate and run all 13 auditor modules concurrently. `fetch_sem` (used above for
+        # 2. Instantiate and run all 14 auditor modules concurrently. `fetch_sem` (used above for
         # the shared page pre-fetch) is also handed to every module as its request budget for any
         # *extra* requests it makes beyond shared_pages (robots.txt, xmlrpc.php, REST API probes,
         # etc.) — one shared budget for the whole run, not one per module independently, so the
@@ -279,6 +280,7 @@ async def execute_site_audit(
             WpHealthAuditor(site.url, site, shared_pages, fetch_sem),
             RedirectsAuditor(site.url, site),
             ContactFormsAuditor(site.url, site, shared_pages, fetch_sem),
+            TrackingScriptsAuditor(site.url, site, shared_pages, fetch_sem),
         ]
 
         # Execute all auditors with exception shield so one auditor failure doesn't crash the rest

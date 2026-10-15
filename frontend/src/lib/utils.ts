@@ -21,6 +21,7 @@ import {
   Compass,
   HelpCircle,
   MailCheck,
+  Radar,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -159,6 +160,7 @@ export function moduleDisplayName(module: string): string {
     a11y: 'Accessibility (A11y)',
     uptime: 'Uptime & Response',
     contact_forms: 'Contact Forms',
+    tracking_scripts: 'Tracking & Analytics Scripts',
   }
   return map[module.toLowerCase()] || module.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
@@ -184,6 +186,7 @@ export function moduleIcon(module: string): LucideIcon {
     a11y: Eye,
     uptime: Activity,
     contact_forms: MailCheck,
+    tracking_scripts: Radar,
   }
   return map[module.toLowerCase()] || Activity
 }
