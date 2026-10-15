@@ -18,6 +18,17 @@ class NapAuditor(BaseAuditor):
         r"(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}"
     )
 
+    # Best-effort generic street-address discovery for when no expected_address is configured —
+    # used only to populate "something was found" signal, not for consistency matching (that uses
+    # the anchored fuzzy match below, which is what actually finds a *specific* known address).
+    ADDRESS_REGEX = re.compile(
+        r"\d{1,6}\s+[A-Za-z0-9.\-'’ ]{2,40}?\s+"
+        r"(?:St(?:reet)?|Ave(?:nue)?|Rd|Road|Blvd|Boulevard|Dr(?:ive)?|Ln|Lane|Way|Hwy|Highway|"
+        r"Pkwy|Parkway|Ct|Court|Cir|Circle|Pl|Place|Suite|Ste|Trail|Trl|Terrace|Ter|Loop)\b"
+        r"[^.\n]{0,60}",
+        re.IGNORECASE,
+    )
+
     def _normalize_phone(self, text: str | None) -> str:
         if not text:
             return ""
@@ -29,6 +40,66 @@ class NapAuditor(BaseAuditor):
         s1 = re.sub(r"\s+", " ", str1.lower().strip())
         s2 = re.sub(r"\s+", " ", str2.lower().strip())
         return SequenceMatcher(None, s1, s2).ratio()
+
+    def _address_text_match(self, expected_address: str, haystack: str, threshold: float = 0.5) -> tuple[bool, str]:
+        """A real street address is almost always printed as plain text in the footer/contact
+        page, not as JSON-LD schema — schema-only extraction misses it entirely even when it's
+        right there on the page (confirmed: real client sites with an exact-matching configured
+        address still showed "not found" because nothing ever scanned the visible page text).
+        Anchors on the address's leading street number and/or ZIP code (the two tokens most
+        likely to appear verbatim regardless of formatting differences), then fuzzy-matches a
+        window of surrounding text against the full expected address."""
+        expected_norm = re.sub(r"\s+", " ", expected_address.lower().strip())
+        haystack_norm = re.sub(r"\s+", " ", haystack.lower())
+
+        anchors: list[str] = []
+        num_match = re.match(r"\s*(\d{1,6})\b", expected_norm)
+        if num_match:
+            anchors.append(num_match.group(1))
+        zip_match = re.search(r"\b(\d{5})(?:-\d{4})?\b", expected_norm)
+        if zip_match:
+            anchors.append(zip_match.group(1))
+
+        best_ratio = 0.0
+        best_window = ""
+        for anchor in anchors:
+            for m in re.finditer(r"\b" + re.escape(anchor) + r"\b", haystack_norm):
+                start = max(0, m.start() - 20)
+                end = min(len(haystack_norm), m.start() + len(expected_norm) + 20)
+                window = haystack_norm[start:end]
+                ratio = SequenceMatcher(None, expected_norm, window).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_window = window.strip()
+
+        return best_ratio >= threshold, best_window
+
+    def _name_text_match(self, expected_name: str, haystack: str, threshold: float = 0.5) -> tuple[bool, str]:
+        """Same idea as _address_text_match for the business name: real pages rarely repeat the
+        exact punctuation/spacing of a configured brand name (e.g. "GW Jones Heating & Cooling"
+        vs. the page's actual "G. W. Jones Heating & Cooling, Inc."), so an exact-substring check
+        misses real matches. Anchors on the name's longest distinctive word(s)."""
+        expected_norm = re.sub(r"[^\w\s&]", "", expected_name.lower()).strip()
+        expected_norm = re.sub(r"\s+", " ", expected_norm)
+        haystack_norm = re.sub(r"[^\w\s&]", " ", haystack.lower())
+        haystack_norm = re.sub(r"\s+", " ", haystack_norm)
+
+        words = [w for w in re.findall(r"[a-z]+", expected_norm) if len(w) > 2]
+        anchors = sorted(set(words), key=len, reverse=True)[:2]
+
+        best_ratio = 0.0
+        best_window = ""
+        for anchor in anchors:
+            for m in re.finditer(re.escape(anchor), haystack_norm):
+                start = max(0, m.start() - 15)
+                end = min(len(haystack_norm), m.start() + len(expected_norm) + 15)
+                window = haystack_norm[start:end]
+                ratio = SequenceMatcher(None, expected_norm, window).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_window = window.strip()
+
+        return best_ratio >= threshold, best_window
 
     def _extract_schema_nap(self, soup: BeautifulSoup) -> dict[str, Any]:
         """Extract name, telephone, address from JSON-LD LocalBusiness blocks."""
@@ -84,6 +155,8 @@ class NapAuditor(BaseAuditor):
         discovered_phones: set[str] = set()
         discovered_addresses: list[str] = []
         discovered_names: set[str] = set()
+        address_match_pages: list[str] = []
+        name_match_pages: list[str] = []
 
         timeout = httpx.Timeout(15.0, connect=8.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
@@ -106,17 +179,49 @@ class NapAuditor(BaseAuditor):
                 if schema_nap.get("address"):
                     discovered_addresses.append(schema_nap["address"])
 
-                # 2. Extract footer text
+                # 2. Extract footer text (falls back to full page text if no footer element
+                # found, so a mismatched selector never silently loses visible NAP info)
                 footer = soup.find("footer") or soup.find(id=re.compile("footer", re.I)) or soup.find(class_=re.compile("footer", re.I))
-                text_to_scan = footer.get_text(" ", strip=True) if footer else soup.get_text(" ", strip=True)
+                footer_text = footer.get_text(" ", strip=True) if footer else None
+                full_text = soup.get_text(" ", strip=True)
+                text_to_scan = footer_text or full_text
 
                 # Look for phone numbers in footer or page
                 raw_phones = self.PHONE_REGEX.findall(text_to_scan)
                 clean_candidates = [p.strip() for p in raw_phones if len(self._normalize_phone(p)) >= 7]
                 for p in clean_candidates[:3]:
                     discovered_phones.add(p)
-
                 page_info["phones_detected"] = clean_candidates[:3]
+
+                # 3. Generic plain-text address discovery (best-effort, independent of schema) —
+                # used for the "is any address present at all" check and as an auto-detected
+                # fallback when the site has no expected_address configured yet.
+                for m in self.ADDRESS_REGEX.finditer(text_to_scan):
+                    candidate = re.sub(r"\s+", " ", m.group(0)).strip().rstrip(",")
+                    if candidate and candidate not in discovered_addresses:
+                        discovered_addresses.append(candidate)
+
+                # 4. Direct fuzzy text match against the *configured* expected address/name —
+                # this is what actually finds real-world NAP info, since it's printed as plain
+                # text on the page, not structured schema. Check the footer first; if that
+                # selector missed the real contact block, also check the full page text before
+                # giving up on this page.
+                if expected_address:
+                    matched, _ = self._address_text_match(expected_address, text_to_scan)
+                    if not matched and footer_text:
+                        matched, _ = self._address_text_match(expected_address, full_text)
+                    page_info["address_text_match"] = matched
+                    if matched:
+                        address_match_pages.append(page_key)
+
+                if expected_name:
+                    matched, _ = self._name_text_match(expected_name, text_to_scan)
+                    if not matched and footer_text:
+                        matched, _ = self._name_text_match(expected_name, full_text)
+                    page_info["name_text_match"] = matched
+                    if matched:
+                        name_match_pages.append(page_key)
+
                 findings["pages_checked"][page_key] = page_info
 
         # If expected NAP is not set in DB, auto-detect from gathered schema / page
@@ -137,6 +242,8 @@ class NapAuditor(BaseAuditor):
             "phones": list(discovered_phones),
             "addresses": discovered_addresses,
         }
+        findings["address_found_on_pages"] = address_match_pages
+        findings["name_found_on_pages"] = name_match_pages
 
         # Validate presence
         if not expected_name and not expected_phone and not expected_address:
@@ -155,22 +262,33 @@ class NapAuditor(BaseAuditor):
                     score -= 15.0
                     issues.append("Expected phone number not found across audited pages")
 
-            # Check Address consistency
+            # Check Address consistency — the direct text match (above) is the primary signal
+            # since that's how a real address actually appears on a page; the schema/regex
+            # discovered_addresses list is only used as a secondary fallback and for the mismatch
+            # message when neither match succeeds.
             if expected_address:
-                addr_matched = any(self._fuzzy_match(expected_address, a) > 0.65 for a in discovered_addresses)
-                if not addr_matched and discovered_addresses:
-                    score -= 20.0
-                    issues.append("Physical address found in schema/footer does not match expected address")
-                elif not discovered_addresses:
-                    score -= 15.0
-                    issues.append("Business physical address not found on contact page or footer")
+                if not address_match_pages:
+                    addr_matched = any(self._fuzzy_match(expected_address, a) > 0.55 for a in discovered_addresses)
+                    if addr_matched:
+                        pass
+                    elif discovered_addresses:
+                        score -= 20.0
+                        issues.append(
+                            f"Physical address found on site ({discovered_addresses[0]}) does not "
+                            f"match expected address ({expected_address})"
+                        )
+                    else:
+                        score -= 15.0
+                        issues.append("Business physical address not found on contact page or footer")
 
-            # Check Name consistency
-            if expected_name and discovered_names:
-                name_matched = any(self._fuzzy_match(expected_name, n) > 0.7 for n in discovered_names)
-                if not name_matched:
-                    score -= 20.0
-                    issues.append("Business name differs between schema markup and configured brand name")
+            # Check Name consistency — same direct text match as address, with the discovered
+            # schema name list as a secondary fallback.
+            if expected_name:
+                if not name_match_pages:
+                    name_matched = any(self._fuzzy_match(expected_name, n) > 0.7 for n in discovered_names)
+                    if not name_matched:
+                        score -= 20.0
+                        issues.append("Business name not found or differs from the configured brand name")
 
         final_score = round(max(0.0, min(100.0, score)), 1)
         status = self._score_to_status(final_score)

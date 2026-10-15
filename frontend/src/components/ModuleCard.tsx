@@ -388,6 +388,71 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
             </div>
         )}
 
+        {/* WordPress plugin inventory (wp_health) — its own section so the plugin list doesn't
+            get lost inside the generic details dump, same treatment as the Unlighthouse/
+            Advertools bespoke summaries below. */}
+        {result.details &&
+          typeof result.details === 'object' &&
+          Array.isArray((result.details as any).installed_plugins) &&
+          (result.details as any).installed_plugins.length > 0 && (
+            <div className="space-y-2 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-200/70 dark:border-slate-800">
+              <span className="font-semibold text-slate-800 dark:text-slate-200 block text-xs">
+                Installed Plugins ({(result.details as any).installed_plugins.length}
+                {typeof (result.details as any).active_plugins_count === 'number'
+                  ? `, ${(result.details as any).active_plugins_count} active`
+                  : ''}
+                ):
+              </span>
+
+              {(result.details as any).too_many_active_plugins && (
+                <div className="flex items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded px-2.5 py-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    {(result.details as any).too_many_active_plugins} active plugins is on the
+                    high side — each one adds load time, attack surface, and
+                    update/compatibility risk.
+                  </span>
+                </div>
+              )}
+
+              {(result.details as any).plugin_count_source === 'inferred_from_assets' && (
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 italic">
+                  Inferred from front-end asset URLs — no WP Application Password is configured
+                  for this site, so inactive plugins and any plugin with no front-end assets
+                  won't appear here; treat this as a lower bound.
+                </p>
+              )}
+
+              <div className="max-h-56 overflow-y-auto space-y-1">
+                {((result.details as any).installed_plugins as any[]).map((p, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-center justify-between gap-2 text-[11px] bg-white dark:bg-slate-800/80 px-2.5 py-1.5 rounded border border-slate-200/50 dark:border-slate-700/50"
+                  >
+                    <span className="text-slate-700 dark:text-slate-300 truncate">{p.name}</span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {p.version && (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 text-[10px] font-mono">
+                          v{p.version}
+                        </span>
+                      )}
+                      <span
+                        className={cn(
+                          'px-1.5 py-0.5 rounded text-[10px] font-medium capitalize',
+                          p.status === 'active'
+                            ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400'
+                            : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400'
+                        )}
+                      >
+                        {p.status}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+        )}
+
         {/* Advertools custom technical SEO view if available */}
         {result.details && typeof result.details === 'object' && (result.details as any).robots_txt && (result.details as any).sitemap && (
           <div className="space-y-3 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-200/70 dark:border-slate-800">
@@ -479,11 +544,24 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
             ) : (
               <div className="bg-slate-50 dark:bg-slate-900/60 p-2.5 rounded-lg border border-slate-200/60 dark:border-slate-800">
                 <DataView
-                  value={
-                    Array.isArray((result.details as any)?.pages) && (result.details as any).pages.length > 1
-                      ? Object.fromEntries(Object.entries(result.details as any).filter(([k]) => k !== 'pages'))
+                  value={(() => {
+                    const details = result.details as Record<string, unknown>
+                    const exclude = new Set<string>()
+                    if (Array.isArray(details.pages) && (details.pages as any[]).length > 1) {
+                      exclude.add('pages')
+                    }
+                    if (Array.isArray(details.installed_plugins) && (details.installed_plugins as any[]).length > 0) {
+                      exclude.add('installed_plugins')
+                      exclude.add('plugin_count_source')
+                      exclude.add('authenticated_plugins_count')
+                      exclude.add('active_plugins_count')
+                      exclude.add('inferred_active_plugin_count')
+                      exclude.add('too_many_active_plugins')
+                    }
+                    return exclude.size > 0
+                      ? Object.fromEntries(Object.entries(details).filter(([k]) => !exclude.has(k)))
                       : result.details
-                  }
+                  })()}
                 />
               </div>
             )}
