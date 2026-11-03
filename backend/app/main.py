@@ -6,6 +6,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+import sqlalchemy as sa
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_mcp import AuthConfig, FastApiMCP
@@ -72,6 +73,10 @@ async def lifespan(app: FastAPI):
 
     # 1. Create database schema tables if not exist
     Base.metadata.create_all(bind=engine)
+    # create_all only creates missing *tables*; columns added to existing tables need an
+    # explicit, idempotent ALTER so an upgraded backend boots against an older database.
+    with engine.begin() as conn:
+        conn.execute(sa.text("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS modules JSON"))
     logger.info("Database schema initialized.")
 
     # 2. Check and seed default administrator
@@ -147,6 +152,7 @@ mcp = FastApiMCP(
         "get_site_sites__site_id__get",
         "trigger_audit_sites__site_id__audit_post",
         "get_site_history_sites__site_id__history_get",
+        "list_audit_modules_audits_modules_get",
         "list_audits_audits_get",
         "get_audit_audits__audit_run_id__get",
         "export_audit_audits__audit_run_id__export_get",

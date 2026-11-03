@@ -92,6 +92,12 @@ class AuditRun(Base):
     status = sa.Column(sa.String(50), default="pending", nullable=False)  # "pending", "running", "completed", "failed", "cancelled"
     triggered_by = sa.Column(sa.String(50), default="manual", nullable=False)  # "cron", "manual"
     scope = sa.Column(sa.String(20), default="quick", nullable=False)  # "quick", "with_posts", "full"
+    # Subset of module names this run was limited to (see scheduler.AUDIT_MODULES). NULL means
+    # the full module set ran — a "partial" run is any row where this is set. Partial runs keep
+    # their own overall_score (weighted over just those modules) but are excluded from the
+    # site's headline score/trend and never trigger alert emails, so a pagespeed-only re-check
+    # doesn't masquerade as a full-site health reading.
+    modules = sa.Column(sa.JSON, nullable=True)
     started_at = sa.Column(sa.DateTime, nullable=True)
     completed_at = sa.Column(sa.DateTime, nullable=True)
     overall_score = sa.Column(sa.Float, nullable=True)

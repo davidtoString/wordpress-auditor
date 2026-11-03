@@ -261,6 +261,8 @@ def build_report_data(site: Site | None, run: AuditRun, results: list[AuditResul
         "audit": {
             "id": str(run.id),
             "scope": run.scope,
+            "modules": run.modules,  # None = full run; otherwise the module subset that ran
+            "partial": run.modules is not None,
             "status": run.status,
             "triggered_by": run.triggered_by,
             "started_at": run.started_at.isoformat() if run.started_at else None,

@@ -50,12 +50,15 @@ scheduler = BackgroundScheduler()
 _RUNNING_AUDIT_TASKS: dict[str, asyncio.Task] = {}
 
 
-def dispatch_audit(site_id_str: str, triggered_by: str, scope: str) -> uuid.UUID:
+def dispatch_audit(
+    site_id_str: str, triggered_by: str, scope: str, modules: list[str] | None = None
+) -> uuid.UUID:
     """Start an audit run as a trackable asyncio Task (instead of FastAPI's fire-and-forget
     BackgroundTasks) and register it so it can be cancelled later. Returns the new audit_run_id
-    immediately, before the audit itself has done any work."""
+    immediately, before the audit itself has done any work. `modules` limits the run to a subset
+    of AUDIT_MODULES (already validated via normalize_modules); None runs everything."""
     audit_run_id = uuid.uuid4()
-    task = asyncio.create_task(execute_site_audit(site_id_str, triggered_by, scope, audit_run_id))
+    task = asyncio.create_task(execute_site_audit(site_id_str, triggered_by, scope, audit_run_id, modules))
     _RUNNING_AUDIT_TASKS[str(audit_run_id)] = task
     task.add_done_callback(lambda _t: _RUNNING_AUDIT_TASKS.pop(str(audit_run_id), None))
     return audit_run_id
@@ -87,6 +90,41 @@ def mark_orphaned_runs_as_failed(db: Session) -> None:
             logger.warning("Marked %d orphaned audit run(s) as failed on startup", len(stuck))
     except Exception as exc:
         logger.error("Failed marking orphaned audit runs: %s", exc)
+
+# Registry of every audit module, keyed by the name stored in AuditResult.module. Order is the
+# display order. `needs_pages` marks modules that read the shared sitemap crawl / page pre-fetch
+# (or, for unlighthouse, the crawl's target paths) — a run that selects only modules without it
+# (e.g. pagespeed-only) skips the crawl entirely and is correspondingly fast.
+AUDIT_MODULES: dict[str, dict[str, Any]] = {
+    "unlighthouse": {"label": "Lighthouse (site-wide)", "needs_pages": True},
+    "advertools": {"label": "Technical SEO (sitemap / robots / SERP)", "needs_pages": True},
+    "pagespeed": {"label": "PageSpeed Insights", "needs_pages": False},
+    "seo": {"label": "On-page SEO", "needs_pages": True},
+    "security": {"label": "Security & hardening", "needs_pages": True},
+    "links": {"label": "Broken links & interlinking", "needs_pages": True},
+    "schema": {"label": "Schema / structured data", "needs_pages": True},
+    "cookies": {"label": "Cookie consent", "needs_pages": False},
+    "images": {"label": "Image optimization", "needs_pages": True},
+    "nap": {"label": "NAP consistency", "needs_pages": False},
+    "wp_health": {"label": "WordPress health", "needs_pages": True},
+    "redirects": {"label": "Redirects & canonical", "needs_pages": False},
+    "contact_forms": {"label": "Contact forms", "needs_pages": True},
+    "tracking_scripts": {"label": "Tracking scripts", "needs_pages": True},
+}
+
+
+def normalize_modules(modules: list[str] | None) -> list[str] | None:
+    """Validate a requested module subset against AUDIT_MODULES. Returns None for "run
+    everything" (None, empty, or every module listed), otherwise the deduplicated subset in
+    registry order. Raises ValueError naming any unknown module."""
+    if not modules:
+        return None
+    unknown = sorted({m for m in modules if m not in AUDIT_MODULES})
+    if unknown:
+        raise ValueError(f"Unknown audit module(s): {', '.join(unknown)}")
+    selected = [m for m in AUDIT_MODULES if m in set(modules)]
+    return None if len(selected) == len(AUDIT_MODULES) else selected
+
 
 # Module weights for overall score calculation
 MODULE_WEIGHTS = {
@@ -170,6 +208,7 @@ async def execute_site_audit(
     triggered_by: str = "manual",
     scope: str = "quick",
     audit_run_id: uuid.UUID | None = None,
+    modules: list[str] | None = None,
 ) -> AuditRun | None:
     """Core asynchronous audit execution pipeline:
     1. Create AuditRun record (status=running)
@@ -187,6 +226,9 @@ async def execute_site_audit(
     db: Session = SessionLocal()
     audit_run_id = audit_run_id or uuid.uuid4()
     site_uuid = uuid.UUID(site_id_str) if isinstance(site_id_str, str) else site_id_str
+    selected_modules = normalize_modules(modules)  # None = full run
+    active_modules = selected_modules or list(AUDIT_MODULES)
+    is_partial = selected_modules is not None
 
     try:
         site = db.query(Site).filter(Site.id == site_uuid).first()
@@ -202,6 +244,7 @@ async def execute_site_audit(
             status="running",
             triggered_by=triggered_by,
             scope=scope,
+            modules=selected_modules,
             started_at=now_utc,
             created_at=now_utc,
         )
@@ -209,8 +252,9 @@ async def execute_site_audit(
         db.commit()
         db.refresh(audit_run)
         logger.info(
-            "Started audit run %s for site %s (%s), scope=%s",
+            "Started audit run %s for site %s (%s), scope=%s, modules=%s",
             audit_run.id, site.name, site.url, scope,
+            ",".join(selected_modules) if is_partial else "all",
         )
 
         # 1b. Discover the target page set for this scope, then fetch each ONCE and share it with
@@ -221,44 +265,53 @@ async def execute_site_audit(
         # homepage-only (today's original behavior) if sitemap discovery fails entirely; modules
         # with genuinely different needs (pagespeed's timing samples, redirects' manual
         # hop-by-hop tracing, cookies' Playwright navigation) are unaffected either way.
-        crawl = await discover_target_pages(site.url, scope, headers=BaseAuditor.DEFAULT_HEADERS)
-        if crawl.crawl_error:
-            logger.info(
-                "Site crawl for %s (scope=%s) fell back to homepage only: %s",
-                site.url, scope, crawl.crawl_error,
-            )
-        logger.info(
-            "Scope %s for %s: %d target page(s) (%d pages, %d posts discovered)",
-            scope, site.url, len(crawl.target_urls), len(crawl.pages), len(crawl.posts),
-        )
-
+        needs_pages = any(AUDIT_MODULES[m]["needs_pages"] for m in active_modules)
         shared_pages: dict[str, httpx.Response] = {}
         fetch_sem = asyncio.Semaphore(5)
+        target_paths: list[str] = ["/"]
 
-        async def _fetch_one(client: httpx.AsyncClient, url: str) -> None:
-            async with fetch_sem:
-                await asyncio.sleep(random.uniform(0.05, 0.25))
-                try:
-                    shared_pages[url] = await client.get(url, headers=BaseAuditor.DEFAULT_HEADERS)
-                except Exception as exc:
-                    logger.warning("Shared page pre-fetch failed for %s: %s", url, exc)
+        if needs_pages:
+            crawl = await discover_target_pages(site.url, scope, headers=BaseAuditor.DEFAULT_HEADERS)
+            if crawl.crawl_error:
+                logger.info(
+                    "Site crawl for %s (scope=%s) fell back to homepage only: %s",
+                    site.url, scope, crawl.crawl_error,
+                )
+            logger.info(
+                "Scope %s for %s: %d target page(s) (%d pages, %d posts discovered)",
+                scope, site.url, len(crawl.target_urls), len(crawl.pages), len(crawl.posts),
+            )
+        else:
+            logger.info(
+                "Run %s selects only modules that don't read the page crawl (%s); skipping sitemap discovery",
+                audit_run.id, ",".join(active_modules),
+            )
 
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(15.0, connect=8.0), follow_redirects=True, verify=False
-        ) as client:
-            await asyncio.gather(*[_fetch_one(client, u) for u in crawl.target_urls])
+        if needs_pages:
+            async def _fetch_one(client: httpx.AsyncClient, url: str) -> None:
+                async with fetch_sem:
+                    await asyncio.sleep(random.uniform(0.05, 0.25))
+                    try:
+                        shared_pages[url] = await client.get(url, headers=BaseAuditor.DEFAULT_HEADERS)
+                    except Exception as exc:
+                        logger.warning("Shared page pre-fetch failed for %s: %s", url, exc)
 
-        # Relative paths (for Unlighthouse's --urls flag) derived from the same target set.
-        # Parsed per-URL via urlparse rather than naively slicing off len(site.url) — a site
-        # that redirects bare-domain to www (or http to https) returns sitemap URLs on a
-        # *different* origin than site.url itself, and slicing by a fixed length computed from
-        # the wrong origin produces a garbage mid-string fragment (e.g. "ing.com/some-page"
-        # instead of "/some-page"), which unlighthouse-ci's own URL parsing then rejects outright
-        # ("Invalid URL") — confirmed reproducible on a site configured without "www." whose
-        # sitemap lives under "www.".
-        target_paths = sorted(
-            {(urlparse(u).path or "/") for u in crawl.target_urls}
-        )
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(15.0, connect=8.0), follow_redirects=True, verify=False
+            ) as client:
+                await asyncio.gather(*[_fetch_one(client, u) for u in crawl.target_urls])
+
+            # Relative paths (for Unlighthouse's --urls flag) derived from the same target set.
+            # Parsed per-URL via urlparse rather than naively slicing off len(site.url) — a site
+            # that redirects bare-domain to www (or http to https) returns sitemap URLs on a
+            # *different* origin than site.url itself, and slicing by a fixed length computed from
+            # the wrong origin produces a garbage mid-string fragment (e.g. "ing.com/some-page"
+            # instead of "/some-page"), which unlighthouse-ci's own URL parsing then rejects outright
+            # ("Invalid URL") — confirmed reproducible on a site configured without "www." whose
+            # sitemap lives under "www.".
+            target_paths = sorted(
+                {(urlparse(u).path or "/") for u in crawl.target_urls}
+            ) or ["/"]
 
         # 2. Instantiate and run all 14 auditor modules concurrently. `fetch_sem` (used above for
         # the shared page pre-fetch) is also handed to every module as its request budget for any
@@ -266,22 +319,24 @@ async def execute_site_audit(
         # etc.) — one shared budget for the whole run, not one per module independently, so the
         # site being audited sees a bounded request rate overall instead of ~13 modules' worth of
         # "reasonable" concurrency stacking up into a burst big enough to trip its rate-limiter.
-        auditors = [
-            UnlighthouseAuditor(site.url, site, scope=scope, target_paths=target_paths),
-            AdvertoolsAuditor(site.url, site, shared_pages, fetch_sem),
-            PageSpeedAuditor(site.url, site),
-            SeoAuditor(site.url, site, shared_pages, fetch_sem),
-            SecurityAuditor(site.url, site, shared_pages, fetch_sem),
-            LinksAuditor(site.url, site, shared_pages, fetch_sem),
-            SchemaValidatorAuditor(site.url, site, shared_pages),
-            CookiesAuditor(site.url, site),
-            ImagesAuditor(site.url, site, shared_pages, fetch_sem),
-            NapAuditor(site.url, site, request_semaphore=fetch_sem),
-            WpHealthAuditor(site.url, site, shared_pages, fetch_sem),
-            RedirectsAuditor(site.url, site),
-            ContactFormsAuditor(site.url, site, shared_pages, fetch_sem),
-            TrackingScriptsAuditor(site.url, site, shared_pages, fetch_sem),
-        ]
+        factories: dict[str, Any] = {
+            "unlighthouse": lambda: UnlighthouseAuditor(site.url, site, scope=scope, target_paths=target_paths),
+            "advertools": lambda: AdvertoolsAuditor(site.url, site, shared_pages, fetch_sem),
+            "pagespeed": lambda: PageSpeedAuditor(site.url, site),
+            "seo": lambda: SeoAuditor(site.url, site, shared_pages, fetch_sem),
+            "security": lambda: SecurityAuditor(site.url, site, shared_pages, fetch_sem),
+            "links": lambda: LinksAuditor(site.url, site, shared_pages, fetch_sem),
+            "schema": lambda: SchemaValidatorAuditor(site.url, site, shared_pages),
+            "cookies": lambda: CookiesAuditor(site.url, site),
+            "images": lambda: ImagesAuditor(site.url, site, shared_pages, fetch_sem),
+            "nap": lambda: NapAuditor(site.url, site, request_semaphore=fetch_sem),
+            "wp_health": lambda: WpHealthAuditor(site.url, site, shared_pages, fetch_sem),
+            "redirects": lambda: RedirectsAuditor(site.url, site),
+            "contact_forms": lambda: ContactFormsAuditor(site.url, site, shared_pages, fetch_sem),
+            "tracking_scripts": lambda: TrackingScriptsAuditor(site.url, site, shared_pages, fetch_sem),
+        }
+        assert set(factories) == set(AUDIT_MODULES), "AUDIT_MODULES and auditor factories drifted apart"
+        auditors = [factories[m]() for m in active_modules]
 
         # Execute all auditors with exception shield so one auditor failure doesn't crash the rest
         async def safe_run(auditor):
@@ -342,7 +397,10 @@ async def execute_site_audit(
         if total_weight_applied > 0:
             overall_score = round(weighted_score_sum / total_weight_applied, 1)
         else:
-            overall_score = 50.0
+            # Only unweighted ("tracked") modules ran — e.g. a NAP-only partial run — so fall
+            # back to their plain average rather than a meaningless constant.
+            scored = [r.score for r in results if r.score is not None]
+            overall_score = round(sum(scored) / len(scored), 1) if scored else 0.0
 
         # 5. Generate AI summary
         ai_summary = ""
@@ -370,7 +428,13 @@ async def execute_site_audit(
 
         target_email = site.notify_email or settings.ALERT_EMAIL or ""
 
-        if email_enabled and target_email:
+        if is_partial:
+            # A subset run's score isn't comparable to the alert threshold (it's weighted over
+            # whichever modules were picked), so neither the score-drop alert nor the
+            # "audit complete" digest is sent for it.
+            logger.info("Audit run %s is a partial (%s) run; skipping email notifications",
+                        audit_run.id, ",".join(active_modules))
+        elif email_enabled and target_email:
             should_alert = (overall_score < threshold) or (alert_on_fail and len(failed_modules) > 0)
             if should_alert:
                 await send_audit_alert_email(

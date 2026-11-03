@@ -14,7 +14,7 @@ from app.auditors.base import BaseAuditor
 from app.auth.utils import get_current_user, require_admin
 from app.database import get_db
 from app.models import AuditRun, Site, User
-from app.scheduler import dispatch_audit, reschedule_site, unschedule_site
+from app.scheduler import dispatch_audit, reschedule_site, unschedule_site, normalize_modules
 
 router = APIRouter(prefix="/sites", tags=["sites"])
 
@@ -107,6 +107,7 @@ class AuditRunSummary(BaseModel):
     status: str
     triggered_by: str
     scope: str = "quick"
+    modules: Optional[List[str]] = None  # None = full run; otherwise the subset that ran
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     overall_score: Optional[float]
@@ -124,9 +125,11 @@ def list_sites(
     results = []
 
     for site in sites:
+        # Headline score/status come from the latest *full* run; partial (module-subset) runs
+        # are scored over just their modules and would misrepresent the site's overall health.
         latest_run = (
             db.query(AuditRun)
-            .filter(AuditRun.site_id == site.id)
+            .filter(AuditRun.site_id == site.id, AuditRun.modules.is_(None))
             .order_by(AuditRun.created_at.desc())
             .first()
         )
@@ -372,6 +375,9 @@ def delete_site(
 
 class AuditTriggerRequest(BaseModel):
     scope: Literal["quick", "with_posts", "full"] = "quick"
+    # Optional subset of audit modules to run (names from GET /audits/modules, e.g.
+    # ["pagespeed"] or ["advertools", "seo"]). Omit / null / empty = run every module.
+    modules: Optional[List[str]] = None
 
 
 @router.post("/{site_id}/audit")
@@ -385,20 +391,32 @@ async def trigger_audit(
 
     scope: "quick" (homepage + WordPress Pages, bounded), "with_posts" (quick + a bounded
     sample of blog posts), or "full" (every discovered URL, no cap — explicitly slow).
+
+    modules: optional list of module names to run instead of the full set (e.g. ["pagespeed"]
+    to re-check Core Web Vitals only, or ["unlighthouse"]). Valid names come from
+    GET /audits/modules. A subset run is recorded as a "partial" audit: it gets its own score
+    over just those modules, but does not update the site's headline score or send alerts.
     """
     site = db.query(Site).filter(Site.id == site_id).first()
     if not site:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
 
+    try:
+        selected = normalize_modules(payload.modules)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
     # Dispatch as a trackable asyncio Task (not fire-and-forget BackgroundTasks) so it can later
     # be cancelled via POST /audits/{audit_run_id}/cancel.
-    audit_run_id = dispatch_audit(str(site.id), "manual", payload.scope)
+    audit_run_id = dispatch_audit(str(site.id), "manual", payload.scope, selected)
 
     return {
-        "message": f"Audit triggered for site '{site.name}' ({site.url})",
+        "message": f"Audit triggered for site '{site.name}' ({site.url})"
+                   + (f" — modules: {', '.join(selected)}" if selected else ""),
         "site_id": site.id,
         "audit_run_id": audit_run_id,
         "scope": payload.scope,
+        "modules": selected,
         "status": "queued",
     }
 

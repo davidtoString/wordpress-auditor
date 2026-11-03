@@ -28,6 +28,7 @@
 - **Deep Technical SEO via Advertools:** Advanced robots.txt user-agent simulation (`Googlebot`, `Bingbot`), recursive sitemap index parsing, and SERP snippet validation.
 - **AI Executive Action Plans:** Transforms audit findings into prioritized developer checklists using your own **OpenAI (GPT-4o)** or **Google Gemini (1.5 Pro)** API keys.
 - **Scheduled Automated Audits:** Built-in APScheduler cron engine per site (e.g., `0 6 * * *` daily at 6 AM).
+- **Run Only the Modules You Need:** Trigger a partial audit limited to specific modules (PageSpeed only, Technical SEO only, Lighthouse only, …) from the site page, the API, or the MCP tool. Partial runs are scored over just those modules and never overwrite the site's headline score or fire alerts.
 - **Transactional Email Alerts:** Branded HTML alert emails via **Resend** triggered whenever site health drops below thresholds.
 - **JWT Multi-User Authentication:** Role-based access control (Admin & Viewer) with self-service password updates.
 - **Zero-Config Docker Deployment:** Single `docker compose up -d` boots PostgreSQL, FastAPI, Chromium, Node 22, and the React dashboard.

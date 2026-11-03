@@ -9,7 +9,8 @@ import type {
   AuditScope,
   ModuleResult,
   Settings,
-  SchedulerJob
+  SchedulerJob,
+  AuditModuleInfo,
 } from './types'
 
 export const api = axios.create({
@@ -134,8 +135,16 @@ export const sites = {
     )
     return response.data
   },
-  async triggerAudit(id: string, scope: AuditScope = 'quick'): Promise<Audit> {
-    const response = await api.post<Audit>(`/sites/${id}/audit`, { scope })
+  async triggerAudit(
+    id: string,
+    scope: AuditScope = 'quick',
+    modules: string[] | null = null
+  ): Promise<Audit> {
+    // `modules` null/empty = run every module; otherwise a subset of names from audits.listModules().
+    const response = await api.post<Audit>(`/sites/${id}/audit`, {
+      scope,
+      modules: modules && modules.length > 0 ? modules : null,
+    })
     return response.data
   },
   async getHistory(id: string, page?: number): Promise<{ audits: Audit[]; total?: number }> {
@@ -150,6 +159,10 @@ export const sites = {
 }
 
 export const audits = {
+  async listModules(): Promise<AuditModuleInfo[]> {
+    const response = await api.get<AuditModuleInfo[]>('/audits/modules')
+    return response.data
+  },
   async list(page?: number, pageSize?: number): Promise<{ audits: Audit[]; total?: number }> {
     const response = await api.get<{ audits: Audit[]; total?: number } | Audit[]>('/audits', {
       params: { page, page_size: pageSize },

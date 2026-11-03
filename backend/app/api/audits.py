@@ -14,7 +14,7 @@ from app.auth.utils import get_current_user
 from app.database import get_db
 from app.models import AuditResult, AuditRun, Site, User
 from app.reporting import build_report_data, render_markdown
-from app.scheduler import cancel_audit_task
+from app.scheduler import cancel_audit_task, AUDIT_MODULES, MODULE_WEIGHTS
 
 router = APIRouter(prefix="/audits", tags=["audits"])
 
@@ -43,6 +43,7 @@ class AuditRunDetail(BaseModel):
     status: str
     triggered_by: str
     scope: str = "quick"
+    modules: Optional[List[str]] = None  # None = full run; otherwise the module subset that ran
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     overall_score: Optional[float]
@@ -61,6 +62,7 @@ class AuditRunListItem(BaseModel):
     status: str
     triggered_by: str
     scope: str = "quick"
+    modules: Optional[List[str]] = None  # None = full run; otherwise the module subset that ran
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     overall_score: Optional[float]
@@ -97,6 +99,7 @@ def list_audits(
             status=run.status,
             triggered_by=run.triggered_by,
             scope=run.scope,
+        modules=run.modules,
             started_at=run.started_at,
             completed_at=run.completed_at,
             overall_score=run.overall_score,
@@ -106,6 +109,28 @@ def list_audits(
         result_list.append(item)
 
     return result_list
+
+
+class AuditModuleInfo(BaseModel):
+    name: str
+    label: str
+    weight: float  # share of the overall score; 0 = tracked only
+    needs_pages: bool  # reads the sitemap crawl / shared page fetch
+
+
+@router.get("/modules", response_model=List[AuditModuleInfo])
+def list_audit_modules(current_user: User = Depends(get_current_user)):
+    """List every audit module that can be selected for a run (POST /sites/{site_id}/audit
+    `modules`), in display order, with its weight in the overall score."""
+    return [
+        AuditModuleInfo(
+            name=name,
+            label=info["label"],
+            weight=MODULE_WEIGHTS.get(name, 0.0),
+            needs_pages=info["needs_pages"],
+        )
+        for name, info in AUDIT_MODULES.items()
+    ]
 
 
 @router.get("/{audit_run_id}", response_model=AuditRunDetail)
@@ -130,6 +155,7 @@ def get_audit(
         status=run.status,
         triggered_by=run.triggered_by,
         scope=run.scope,
+        modules=run.modules,
         started_at=run.started_at,
         completed_at=run.completed_at,
         overall_score=run.overall_score,
@@ -232,12 +258,21 @@ def get_latest_audit_for_site(
     if not site:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
 
+    # Prefer the latest completed *full* run: a partial (module-subset) run only carries the
+    # modules it was limited to, which would blank out the rest of the site's module grid.
     run = (
         db.query(AuditRun)
-        .filter(AuditRun.site_id == site.id, AuditRun.status == "completed")
+        .filter(AuditRun.site_id == site.id, AuditRun.status == "completed", AuditRun.modules.is_(None))
         .order_by(AuditRun.created_at.desc())
         .first()
     )
+    if not run:
+        run = (
+            db.query(AuditRun)
+            .filter(AuditRun.site_id == site.id, AuditRun.status == "completed")
+            .order_by(AuditRun.created_at.desc())
+            .first()
+        )
 
     if not run:
         # Fallback to any run if none completed yet
@@ -261,6 +296,7 @@ def get_latest_audit_for_site(
         status=run.status,
         triggered_by=run.triggered_by,
         scope=run.scope,
+        modules=run.modules,
         started_at=run.started_at,
         completed_at=run.completed_at,
         overall_score=run.overall_score,

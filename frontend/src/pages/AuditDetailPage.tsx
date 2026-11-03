@@ -22,7 +22,7 @@ import { audits as auditsApi } from '../lib/api'
 import type { ModuleResult } from '../lib/types'
 import ScoreBadge from '../components/ScoreBadge'
 import ModuleCard from '../components/ModuleCard'
-import { formatDate, formatRelative } from '../lib/utils'
+import { formatDate, formatRelative, moduleDisplayName } from '../lib/utils'
 import toast from 'react-hot-toast'
 
 export const AuditDetailPage: React.FC = () => {
@@ -208,6 +208,17 @@ export const AuditDetailPage: React.FC = () => {
                 <span className="flex items-center gap-1">
                   <LayoutGrid className="w-3.5 h-3.5 text-slate-400" />
                   Scope: {audit.scope === 'quick' ? 'Quick (Pages)' : audit.scope === 'with_posts' ? '+ Blog Posts' : 'Full Site'}
+                </span>
+              </>
+            )}
+            {audit.modules && audit.modules.length > 0 && (
+              <>
+                <span>&bull;</span>
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-violet-50 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 font-medium"
+                  title="Partial run: only these modules ran. Its score covers them alone and does not update the site's headline score."
+                >
+                  Partial: {audit.modules.map((m) => moduleDisplayName(m)).join(', ')}
                 </span>
               </>
             )}

@@ -75,6 +75,8 @@ export interface Audit {
   score: number | null
   triggered_by: string
   scope: AuditScope
+  /** Module subset this run was limited to; null/undefined = full run. */
+  modules?: string[] | null
   started_at: string
   completed_at?: string | null
   duration_seconds?: number | null
@@ -126,4 +128,13 @@ export interface DashboardStats {
     count: number
     color: string
   }[]
+}
+
+export interface AuditModuleInfo {
+  name: string
+  label: string
+  /** Share of the overall score (0 = tracked only, not scored). */
+  weight: number
+  /** Whether the module reads the sitemap crawl / shared page fetch. */
+  needs_pages: boolean
 }

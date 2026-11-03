@@ -11,7 +11,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import type { Audit } from '../lib/types'
-import { formatRelative, formatDate } from '../lib/utils'
+import { formatRelative, formatDate, moduleDisplayName } from '../lib/utils'
 import ScoreBadge from './ScoreBadge'
 
 interface AuditRunsTableProps {
@@ -156,7 +156,19 @@ export const AuditRunsTable: React.FC<AuditRunsTableProps> = ({
                 <td className="py-3.5 px-4">
                   <ScoreBadge score={audit.score} size="sm" showLabel />
                 </td>
-                <td className="py-3.5 px-4">{renderStatus(audit.status)}</td>
+                <td className="py-3.5 px-4">
+                  <div className="flex flex-col gap-0.5">
+                    {renderStatus(audit.status)}
+                    {audit.modules && audit.modules.length > 0 && (
+                      <span
+                        className="inline-flex w-fit items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-50 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300"
+                        title={audit.modules.map((m) => moduleDisplayName(m)).join(', ')}
+                      >
+                        Partial · {audit.modules.length === 1 ? moduleDisplayName(audit.modules[0]) : `${audit.modules.length} modules`}
+                      </span>
+                    )}
+                  </div>
+                </td>
                 <td className="py-3.5 px-4">{renderTriggeredBy(audit.triggered_by)}</td>
                 <td className="py-3.5 px-4">
                   <span

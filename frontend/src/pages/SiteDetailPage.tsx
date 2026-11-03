@@ -17,6 +17,7 @@ import {
   PlayCircle,
   Trash2,
   AlertCircle,
+  SlidersHorizontal,
 } from 'lucide-react'
 import Modal from '../components/ui/Modal'
 import {
@@ -30,7 +31,7 @@ import {
 } from 'recharts'
 import { sites as sitesApi, audits as auditsApi } from '../lib/api'
 import { useAuth } from '../lib/auth'
-import type { ModuleResult, AuditScope } from '../lib/types'
+import type { ModuleResult, AuditScope, AuditModuleInfo } from '../lib/types'
 import ScoreBadge from '../components/ScoreBadge'
 import ModuleCard from '../components/ModuleCard'
 import AuditRunsTable from '../components/AuditRunsTable'
@@ -44,6 +45,9 @@ export const SiteDetailPage: React.FC = () => {
   const navigate = useNavigate()
   const [historyPage, setHistoryPage] = useState(1)
   const [auditScope, setAuditScope] = useState<AuditScope>('quick')
+  // Module subset for the next manual run. null = every module (the default, full audit).
+  const [selectedModules, setSelectedModules] = useState<string[] | null>(null)
+  const [showModulePicker, setShowModulePicker] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
 
   // 1. Fetch Site Info
@@ -71,14 +75,24 @@ export const SiteDetailPage: React.FC = () => {
     enabled: !!id,
   })
 
+  // 3b. Available audit modules (for the module picker)
+  const { data: availableModules = [] } = useQuery<AuditModuleInfo[]>({
+    queryKey: ['audit-modules'],
+    queryFn: () => auditsApi.listModules(),
+    staleTime: 5 * 60 * 1000,
+  })
+
   // 4. Trigger Audit Mutation
   const triggerMutation = useMutation({
-    mutationFn: (scope: AuditScope) => sitesApi.triggerAudit(id!, scope),
-    onSuccess: (_data, scope) => {
+    mutationFn: ({ scope, modules }: { scope: AuditScope; modules: string[] | null }) =>
+      sitesApi.triggerAudit(id!, scope, modules),
+    onSuccess: (_data, { scope, modules }) => {
       toast.success(
-        scope === 'full'
-          ? 'Full site audit started — this can take a while, feel free to check back later.'
-          : 'Audit execution initiated!'
+        modules && modules.length > 0
+          ? `Partial audit started (${modules.length} module${modules.length === 1 ? '' : 's'}).`
+          : scope === 'full'
+            ? 'Full site audit started — this can take a while, feel free to check back later.'
+            : 'Audit execution initiated!'
       )
       queryClient.invalidateQueries({ queryKey: ['site', id] })
       queryClient.invalidateQueries({ queryKey: ['site-history', id] })
@@ -127,6 +141,28 @@ export const SiteDetailPage: React.FC = () => {
     { value: 'full', label: 'Full Site (slow)' },
   ]
 
+  const allModuleNames = availableModules.map((m) => m.name)
+  const isPartialSelection = selectedModules !== null && selectedModules.length < allModuleNames.length
+  const toggleModule = (name: string) => {
+    const current = selectedModules ?? allModuleNames
+    const next = current.includes(name) ? current.filter((m) => m !== name) : [...current, name]
+    // Back to "all" collapses to null so the run is recorded as a full audit, not a subset.
+    setSelectedModules(next.length === allModuleNames.length ? null : next)
+  }
+  const modulePresets: { label: string; modules: string[] | null }[] = [
+    { label: 'All modules', modules: null },
+    { label: 'PageSpeed only', modules: ['pagespeed'] },
+    { label: 'Lighthouse only', modules: ['unlighthouse'] },
+    { label: 'Technical SEO', modules: ['advertools', 'seo', 'redirects', 'schema'] },
+    { label: 'Security & WP health', modules: ['security', 'wp_health'] },
+  ]
+  const moduleButtonLabel =
+    selectedModules === null
+      ? 'All modules'
+      : selectedModules.length === 1
+        ? availableModules.find((m) => m.name === selectedModules[0])?.label || selectedModules[0]
+        : `${selectedModules.length} of ${allModuleNames.length} modules`
+
   if (siteLoading) {
     return (
       <div className="py-24 flex flex-col items-center justify-center">
@@ -158,6 +194,7 @@ export const SiteDetailPage: React.FC = () => {
 
   // Build Chronological chart data (last 30 runs, chronological order)
   const chartRuns = [...audits]
+    .filter((run) => !run.modules || run.modules.length === 0)
     .slice(0, 30)
     .reverse()
     .map((run, idx) => ({
@@ -283,8 +320,22 @@ export const SiteDetailPage: React.FC = () => {
 
             <button
               type="button"
-              onClick={() => triggerMutation.mutate(auditScope)}
-              disabled={triggerMutation.isPending}
+              onClick={() => setShowModulePicker(true)}
+              title="Choose which audit modules to run"
+              className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border transition-colors ${
+                isPartialSelection
+                  ? 'border-brand-300 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/40 text-brand-700 dark:text-brand-300'
+                  : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 text-slate-600 dark:text-slate-300 hover:text-slate-800 dark:hover:text-slate-100'
+              }`}
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              {moduleButtonLabel}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => triggerMutation.mutate({ scope: auditScope, modules: selectedModules })}
+              disabled={triggerMutation.isPending || (selectedModules !== null && selectedModules.length === 0)}
               className="inline-flex items-center gap-2 px-5 py-2 text-sm font-semibold rounded-xl text-white bg-brand-600 hover:bg-brand-700 shadow-md shadow-brand-500/20 disabled:opacity-60 transition-all"
             >
               {triggerMutation.isPending ? (
@@ -305,8 +356,98 @@ export const SiteDetailPage: React.FC = () => {
               Scans every page and can take a long time — check back later.
             </p>
           )}
+          {isPartialSelection && (
+            <p className="text-xs text-slate-500 dark:text-slate-400 max-w-xs text-right">
+              Partial run: scored over the selected modules only; the site's headline score and alerts are unaffected.
+            </p>
+          )}
         </div>
       </div>
+
+      <Modal isOpen={showModulePicker} onClose={() => setShowModulePicker(false)} title="Choose audit modules">
+        <div className="space-y-4">
+          <p className="text-sm text-slate-600 dark:text-slate-300">
+            Run only the checks you need — a PageSpeed re-check after a caching change, or a Lighthouse pass on its own.
+            Leaving every module selected runs a normal full audit.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {modulePresets.map((preset) => {
+              const active =
+                preset.modules === null
+                  ? selectedModules === null
+                  : selectedModules !== null &&
+                    preset.modules.length === selectedModules.length &&
+                    preset.modules.every((m) => selectedModules.includes(m))
+              return (
+                <button
+                  key={preset.label}
+                  type="button"
+                  onClick={() => setSelectedModules(preset.modules)}
+                  className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors ${
+                    active
+                      ? 'bg-brand-600 border-brand-600 text-white'
+                      : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700/60'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              )
+            })}
+            <button
+              type="button"
+              onClick={() => setSelectedModules([])}
+              className="px-2.5 py-1 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700/60 transition-colors"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-80 overflow-y-auto pr-1">
+            {availableModules.map((m) => {
+              const checked = selectedModules === null || selectedModules.includes(m.name)
+              return (
+                <label
+                  key={m.name}
+                  className={`flex items-start gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-colors ${
+                    checked
+                      ? 'border-brand-200 dark:border-brand-800 bg-brand-50/60 dark:bg-brand-950/30'
+                      : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/60'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleModule(m.name)}
+                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium text-slate-800 dark:text-slate-100 leading-tight">
+                      {m.label}
+                    </span>
+                    <span className="block text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                      {m.weight > 0 ? `${Math.round(m.weight * 100)}% of overall score` : 'Tracked (not scored)'}
+                      {m.needs_pages ? ' · crawls pages' : ''}
+                    </span>
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+          <div className="flex items-center justify-between pt-1">
+            <span className="text-xs text-slate-500 dark:text-slate-400">
+              {selectedModules === null
+                ? `All ${allModuleNames.length} modules selected`
+                : `${selectedModules.length} of ${allModuleNames.length} selected`}
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowModulePicker(false)}
+              className="px-4 py-2 text-sm font-semibold rounded-xl text-white bg-brand-600 hover:bg-brand-700 transition-colors"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Score History Chart (Last 30 runs) */}
       <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200 dark:border-slate-700/80 p-6 shadow-sm">
@@ -410,7 +551,7 @@ export const SiteDetailPage: React.FC = () => {
               Trigger a manual audit or wait for the cron schedule to execute to inspect the 12 audit modules.
             </p>
             <button
-              onClick={() => triggerMutation.mutate(auditScope)}
+              onClick={() => triggerMutation.mutate({ scope: auditScope, modules: selectedModules })}
               disabled={triggerMutation.isPending}
               className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg text-white bg-brand-600 hover:bg-brand-700"
             >
