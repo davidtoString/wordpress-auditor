@@ -145,6 +145,15 @@ def _module_highlights(module: str, details: dict[str, Any]) -> dict[str, Any]:
         weak_pages = [p for p in (details.get("pages") or []) if p.get("score", 100) < 70]
         if weak_pages:
             highlights["low_scoring_pages"] = weak_pages
+        # Site-wide content checks (seo_content.py): one entry per issue type with the exact
+        # URLs affected and the fix guidance, so an agent can act on each without re-crawling.
+        for issue in (details.get("site_wide") or {}).get("issues") or []:
+            if issue.get("severity") == "info":
+                continue  # noindex/canonicalized/heading-skip heads-ups aren't action items
+            highlights[issue["type"].replace("-", "_")] = {
+                "how_to_fix": issue.get("how_to_fix"),
+                "pages": issue.get("pages"),
+            }
 
     elif module == "wp_health":
         if details.get("version_exposed"):

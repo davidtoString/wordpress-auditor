@@ -40,8 +40,8 @@ const MODULE_HELP: Record<string, { what: string; howToFix: string }> = {
     howToFix: 'Slow scores usually trace back to unoptimized images, too many plugins, or no caching/CDN. Add a Google PageSpeed API key in Settings for full Core Web Vitals data instead of the basic timing fallback.',
   },
   seo: {
-    what: 'On-page SEO signals per scanned page: title tag, meta description, Open Graph tags, canonical URL, robots meta, and heading structure.',
-    howToFix: 'Most findings here are fixed directly in the WordPress editor or your SEO plugin — title/description length, missing H1s, or a noindex tag left on accidentally.',
+    what: 'On-page SEO signals per scanned page: title tag, meta description, Open Graph tags, canonical URL, robots meta, and heading structure. Plus site-wide content checks across every scanned page: duplicate page content, thin content, conflicting canonical signals (HTML tag vs HTTP Link header), heading-level skips, slow HTML responses, and noindex/canonicalized heads-ups.',
+    howToFix: 'Most findings here are fixed directly in the WordPress editor or your SEO plugin — title/description length, missing H1s, or a noindex tag left on accidentally. Each site-wide content finding below carries its own explanation and fix guidance.',
   },
   security: {
     what: 'HTTPS enforcement, standard security response headers, mixed content, XML-RPC exposure, and WordPress version disclosure.',
@@ -359,6 +359,71 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
           </div>
         )}
 
+        {/* Site-wide content checks (seo module, ported from OpenSEO's audit engine): one
+            block per issue type with severity, explanation, the affected URLs and fix guidance. */}
+        {result.details &&
+          typeof result.details === 'object' &&
+          Array.isArray((result.details as any).site_wide?.issues) &&
+          (result.details as any).site_wide.issues.length > 0 && (
+            <div className="space-y-2 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-200/70 dark:border-slate-800">
+              <span className="font-semibold text-slate-800 dark:text-slate-200 block text-xs">
+                Site-Wide Content Checks ({(result.details as any).site_wide.pages_analyzed} pages analyzed):
+              </span>
+              <div className="space-y-1.5">
+                {((result.details as any).site_wide.issues as any[]).map((issue, idx) => {
+                  const sev: string = issue.severity
+                  const sevClass =
+                    sev === 'critical'
+                      ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                      : sev === 'warning'
+                        ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
+                        : 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                  return (
+                    <details
+                      key={idx}
+                      className="group bg-white dark:bg-slate-800/80 rounded border border-slate-200/50 dark:border-slate-700/50"
+                    >
+                      <summary className="cursor-pointer list-none flex items-center justify-between gap-2 px-2.5 py-1.5 text-[11px]">
+                        <span className="flex items-center gap-2 min-w-0">
+                          <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide ${sevClass}`}>
+                            {sev}
+                          </span>
+                          <span className="font-semibold text-slate-800 dark:text-slate-200 truncate">{issue.title}</span>
+                        </span>
+                        <span className="shrink-0 text-slate-500 dark:text-slate-400">
+                          {issue.count} {issue.type === 'duplicate-content' ? (issue.count === 1 ? 'group' : 'groups') : issue.count === 1 ? 'page' : 'pages'}
+                        </span>
+                      </summary>
+                      <div className="px-2.5 pb-2 space-y-1.5 text-[11px] border-t border-slate-100 dark:border-slate-700/60 pt-1.5">
+                        <p className="text-slate-600 dark:text-slate-300 leading-snug">{issue.explanation}</p>
+                        <p className="text-slate-700 dark:text-slate-200 leading-snug">
+                          <span className="font-semibold">How to fix:</span> {issue.how_to_fix}
+                        </p>
+                        <div className="max-h-32 overflow-y-auto space-y-0.5">
+                          {(issue.pages as any[]).map((pg, pidx) => (
+                            <div key={pidx} className="font-mono text-[10px] text-slate-600 dark:text-slate-400 truncate">
+                              {Array.isArray(pg.urls)
+                                ? pg.urls.join('  =  ')
+                                : [
+                                    pg.url,
+                                    typeof pg.word_count === 'number' ? `(${pg.word_count} words)` : null,
+                                    typeof pg.response_time_ms === 'number' ? `(${pg.response_time_ms} ms)` : null,
+                                    pg.canonical_url ? `→ ${pg.canonical_url}` : null,
+                                    pg.html_canonical && pg.header_canonical ? `html: ${pg.html_canonical} | header: ${pg.header_canonical}` : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' ')}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </details>
+                  )
+                })}
+              </div>
+            </div>
+        )}
+
         {/* Generic per-page breakdown for any module that scanned more than one page (seo,
             security, schema, images, wp_health). Unlighthouse has its own richer block above
             (with Lighthouse category sub-scores), so this is skipped when site_averages already
@@ -549,6 +614,9 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
                     const exclude = new Set<string>()
                     if (Array.isArray(details.pages) && (details.pages as any[]).length > 1) {
                       exclude.add('pages')
+                    }
+                    if (details.site_wide && typeof details.site_wide === 'object') {
+                      exclude.add('site_wide')
                     }
                     if (Array.isArray(details.installed_plugins) && (details.installed_plugins as any[]).length > 0) {
                       exclude.add('installed_plugins')

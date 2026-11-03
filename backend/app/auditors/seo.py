@@ -6,6 +6,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.auditors.base import BaseAuditor, AuditModuleResult
+from app.auditors.seo_content import analyze_page_content, run_sitewide_checks
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +182,25 @@ class SeoAuditor(BaseAuditor):
 
         score = sum(page_scores) / len(page_scores)
 
+        # 7b. Site-wide content-quality checks (ported from OpenSEO's audit engine — see
+        # seo_content.py): duplicate page content, thin content, conflicting canonicals,
+        # heading-level skips, slow HTML responses, plus noindex/canonicalized heads-ups.
+        # Runs over the exact responses already in hand, so it costs no extra requests.
+        def _facts_one(args: tuple[str, httpx.Response]):
+            url, page_resp = args
+            try:
+                return analyze_page_content(url, page_resp)
+            except Exception as exc:
+                logger.debug("SEO content analysis failed for %s: %s", url, exc)
+                return None
+
+        content_inputs = [(self.site_url, resp)] + other_pages
+        facts = [f for f in await self._run_in_threads(_facts_one, content_inputs) if f is not None]
+        site_wide = run_sitewide_checks(facts)
+        score -= site_wide["penalty"]
+        issues.extend(site_wide.pop("issue_strings"))
+        findings["site_wide"] = site_wide
+
         # 8. Check robots.txt
         robots_url = f"{self.site_url}/robots.txt"
         findings["robots_txt"] = {"accessible": False, "has_sitemap": False}
@@ -230,7 +250,7 @@ class SeoAuditor(BaseAuditor):
         if len(page_scores) > 1:
             summary = (
                 f"SEO score {final_score:.0f}/100 averaged across {len(page_scores)} page(s). "
-                f"Homepage issues: {'; '.join(issues[:3])}" if issues else
+                f"Key issues: {'; '.join(issues[:3])}" if issues else
                 f"SEO score {final_score:.0f}/100 averaged across {len(page_scores)} page(s)."
             )
         elif issues:

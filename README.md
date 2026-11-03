@@ -40,7 +40,7 @@
 | :--- | :---: | :--- |
 | **Unlighthouse (Site-Wide)** | **20%** | Full-site multi-page crawl running Google Lighthouse across all routes (Performance, Accessibility, Best Practices, SEO). |
 | **Technical SEO (Advertools)** | **15%** | Recursive XML sitemap parsing (`sitemap_index.xml`, `wp-sitemap.xml`), robots.txt Googlebot rule testing, SERP title length truncation check, and Elementor template leaks. |
-| **On-Page SEO** | **15%** | Title tag & meta description length, OpenGraph tags, canonical tags, single H1 hierarchy, and indexing directives. |
+| **On-Page SEO** | **15%** | Title tag & meta description length, OpenGraph tags, canonical tags, single H1 hierarchy, and indexing directives. Site-wide content checks (ported from [OpenSEO](https://github.com/every-app/open-seo)): duplicate page content, thin content, conflicting HTML vs HTTP-header canonicals, heading-level skips, slow HTML responses, noindex/canonicalized heads-ups. |
 | **PageSpeed & Web Vitals** | **15%** | Mobile (60%) & Desktop (40%) Google PageSpeed Insights API check: LCP, CLS, FCP, TTFB, and Speed Index. |
 | **Security & Hardening** | **15%** | HTTPS redirect verification, HSTS, CSP, X-Frame-Options, XML-RPC exposure, and WP version leakage. |
 | **Broken Links** | **10%** | Internal and external link crawl (up to 200 URLs), detecting 4xx/5xx errors, redirect chains (>2 hops), and loops. |
