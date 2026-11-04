@@ -97,7 +97,10 @@ class AuditRun(Base):
     # their own overall_score (weighted over just those modules) but are excluded from the
     # site's headline score/trend and never trigger alert emails, so a pagespeed-only re-check
     # doesn't masquerade as a full-site health reading.
-    modules = sa.Column(sa.JSON, nullable=True)
+    # none_as_null: a plain sa.JSON stores Python None as the JSON literal 'null', which the
+    # `modules IS NULL` full-run filters below do not match (full runs would vanish from the
+    # headline score / latest audit / trend). Store None as SQL NULL instead.
+    modules = sa.Column(sa.JSON(none_as_null=True), nullable=True)
     started_at = sa.Column(sa.DateTime, nullable=True)
     completed_at = sa.Column(sa.DateTime, nullable=True)
     overall_score = sa.Column(sa.Float, nullable=True)

@@ -77,6 +77,9 @@ async def lifespan(app: FastAPI):
     # explicit, idempotent ALTER so an upgraded backend boots against an older database.
     with engine.begin() as conn:
         conn.execute(sa.text("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS modules JSON"))
+        # Rows written before modules used none_as_null=True hold the JSON literal 'null'
+        # instead of SQL NULL, which hid those full runs from every `modules IS NULL` filter.
+        conn.execute(sa.text("UPDATE audit_runs SET modules = NULL WHERE modules::text = 'null'"))
     logger.info("Database schema initialized.")
 
     # 2. Check and seed default administrator
