@@ -400,6 +400,22 @@ async def execute_site_audit(
                         audit_run.id, site.name, site.url, scope,
                         ",".join(selected_modules) if is_partial else "all", queue_length())
 
+            results: list[AuditModuleResult] = []
+
+            # Availability first, before this run puts any load on the site, so its response
+            # time reflects what a visitor sees and not our own crawl (measured mid-run it read
+            # 9-16s on a site that answers in 80ms).
+            if "availability" in active_modules:
+                try:
+                    results.append(await AvailabilityAuditor(site.url, site).run())
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error("Availability check crashed on %s: %s", site.url, e, exc_info=True)
+                    results.append(AuditModuleResult(module="availability", score=None, status="error",
+                                                     summary=f"Not measured: availability check crashed ({e})",
+                                                     details={"error": str(e), "not_measured": True}))
+
             # 2. Discover and fetch target pages once
             needs_pages = any(AUDIT_MODULES[m]["needs_pages"] for m in active_modules)
             shared_pages: dict[str, httpx.Response] = {}
@@ -457,7 +473,7 @@ async def execute_site_audit(
                 "tracking_scripts": lambda: TrackingScriptsAuditor(site.url, site, shared_pages, fetch_sem),
             }
             assert set(factories) | _POST_MODULES == set(AUDIT_MODULES), "AUDIT_MODULES and auditor factories drifted apart"
-            auditors = [(m, factories[m]()) for m in active_modules if m not in _POST_MODULES]
+            auditors = [(m, factories[m]()) for m in active_modules if m not in _POST_MODULES and m != "availability"]
 
             async def safe_run(name: str, auditor) -> AuditModuleResult:
                 try:
@@ -470,7 +486,7 @@ async def execute_site_audit(
                                              summary=f"Not measured: module crashed ({type(e).__name__}: {e})",
                                              details={"error": str(e), "not_measured": True})
 
-            results: list[AuditModuleResult] = list(await asyncio.gather(*[safe_run(n, a) for n, a in auditors]))
+            results.extend(await asyncio.gather(*[safe_run(n, a) for n, a in auditors]))
 
             # Post modules
             if "visual" in active_modules:

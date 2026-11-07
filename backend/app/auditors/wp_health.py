@@ -87,9 +87,12 @@ class WpHealthAuditor(BaseAuditor):
         # one across wp-includes assets is the running core version.
         if not detected_version:
             vers = re.findall(r"/wp-includes/[^\s\"']+\?ver=(\d+\.\d+(?:\.\d+)?)", homepage_html)
+            # Only values that look like a core release (4.x to 9.x); plugins and themes also
+            # tag wp-includes assets with their own versions.
+            vers = [v for v in vers if re.match(r"^[4-9]\.\d+(?:\.\d+)?$", v)]
             if vers:
                 best = max(set(vers), key=vers.count)
-                if vers.count(best) >= 2:
+                if vers.count(best) >= 3:
                     detected_version = best
                     version_exposed = True
                     version_source = "wp-includes asset ?ver= strings"

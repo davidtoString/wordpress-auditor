@@ -97,6 +97,11 @@ def extract_findings(
         if av.get("dns_ok") is False:
             add(type="dns_failed", severity="critical", section="urgent", module="availability",
                 title="Domain does not resolve in DNS", detail={"error": av.get("dns_error")})
+        lat = av.get("http_latency_ms")
+        if lat and lat >= 5000 and (av.get("http_status") or 0) < 500:
+            add(type="slow_response", severity="high" if lat >= 10000 else "medium", section="urgent" if lat >= 10000 else "improve",
+                module="availability", title=f"Homepage took {lat / 1000:.1f}s to respond (server side, before any rendering)",
+                detail={"latency_ms": lat, "server": av.get("server")})
         if av.get("http_status") and av["http_status"] >= 500:
             add(type="site_down", severity="critical", section="urgent", module="availability",
                 title=f"Homepage returns HTTP {av['http_status']}", detail={"status": av["http_status"]})
@@ -518,7 +523,7 @@ def diff_inventory(prev: dict[str, Any] | None, cur: dict[str, Any], site_url: s
     if pd_ and cd:
         new_domains = sorted(cd - pd_)
         if new_domains:
-            ch("external_domains_added", "medium" if len(new_domains) >= 3 else "low",
+            ch("external_domains_added", "medium" if len(new_domains) >= 4 else "info",
                f"{len(new_domains)} new external domain(s) linked: {', '.join(new_domains[:6])}", domains=new_domains[:30])
 
     # Forms
@@ -537,14 +542,19 @@ def diff_inventory(prev: dict[str, Any] | None, cur: dict[str, Any], site_url: s
         if a is None or b is None:
             continue
         delta = b - a
-        if delta <= -15:
-            ch("perf_drop", "high" if delta <= -25 else "medium", f"Performance dropped on {path}: {a:.0f} → {b:.0f}", path=path, before=a, after=b)
-        elif delta >= 15:
+        # Lighthouse varies run to run (observed ±25 on one page within 15 minutes on a site
+        # whose server response time swings), so single-page moves are reported conservatively
+        # and only large drops count as notable. The site-wide average below is the reliable signal.
+        if delta <= -30:
+            ch("perf_drop", "medium", f"Performance dropped on {path}: {a:.0f} → {b:.0f}", path=path, before=a, after=b)
+        elif delta <= -20:
+            ch("perf_drop", "low", f"Performance dropped on {path}: {a:.0f} → {b:.0f}", path=path, before=a, after=b)
+        elif delta >= 25:
             ch("perf_gain", "info", f"Performance improved on {path}: {a:.0f} → {b:.0f}", path=path, before=a, after=b)
     if prev.get("perf_avg") is not None and cur.get("perf_avg") is not None:
         delta = cur["perf_avg"] - prev["perf_avg"]
         if abs(delta) >= 10:
-            ch("perf_avg", "medium" if delta < 0 else "info",
+            ch("perf_avg", "high" if delta <= -15 else "medium" if delta < 0 else "info",
                f"Site-wide Performance average {prev['perf_avg']:.0f} → {cur['perf_avg']:.0f}", before=prev["perf_avg"], after=cur["perf_avg"])
 
     if prev.get("dns") and cur.get("dns") and sorted(prev["dns"]) != sorted(cur["dns"]):

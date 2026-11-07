@@ -212,8 +212,14 @@ class LinksAuditor(BaseAuditor):
             all_internal_links.update(int_links)
             all_external_links.update(ext_links)
 
-            # 2. Sample up to MAX_ADDITIONAL_PAGES from internal links to collect deeper links
-            additional_pages = list(all_internal_links - {self.site_url, f"{self.site_url}/"})[:self.MAX_ADDITIONAL_PAGES]
+            # 2. Sample up to MAX_ADDITIONAL_PAGES internal pages to collect deeper links.
+            # Deterministic: pages already fetched for this run first (no extra requests), then
+            # the rest in sorted order. A random set slice here made the external-domain
+            # inventory differ between identical runs.
+            candidates = all_internal_links - {self.site_url, f"{self.site_url}/"}
+            prefetched = [u for u in self.shared_pages if u.rstrip("/") in {c.rstrip("/") for c in candidates}]
+            rest = sorted(c for c in candidates if c.rstrip("/") not in {p.rstrip("/") for p in prefetched})
+            additional_pages = (prefetched + rest)[:self.MAX_ADDITIONAL_PAGES]
             if additional_pages:
                 sub_pages_html = await asyncio.gather(*[self._fetch_page(client, page) for page in additional_pages])
                 for page_url, html_str in zip(additional_pages, sub_pages_html):
