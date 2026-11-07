@@ -36,8 +36,15 @@ class PageSpeedAuditor(BaseAuditor):
                     strategy,
                     resp.text[:200],
                 )
+                reason = f"HTTP {resp.status_code}"
+                try:
+                    reason = f"HTTP {resp.status_code}: {resp.json()['error']['message'][:160]}"
+                except Exception:
+                    pass
+                self._last_api_error = reason
         except Exception as exc:
             logger.error("PageSpeed API request failed for %s (%s): %s", self.site_url, strategy, exc)
+            self._last_api_error = str(exc)[:200]
         return None
 
     def _extract_lighthouse_metrics(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -67,8 +74,16 @@ class PageSpeedAuditor(BaseAuditor):
             "speed_index": get_audit("speed-index"),
         }
 
-    async def _run_http_timing_fallback(self) -> AuditModuleResult:
-        """Lightweight HTTP performance measurement fallback when Google API is not available."""
+    _last_api_error: str | None = None
+
+    async def _run_http_timing_fallback(self, reason: str) -> AuditModuleResult:
+        """When PageSpeed Insights is unavailable, record WHY and a raw TTFB sample, but no score.
+
+        This used to map TTFB onto a made-up 30-95 "performance score", which looked exactly
+        like a real Lighthouse number on the dashboard. A missing measurement is reported as
+        missing (score=None, status=error) so it neither counts toward the overall score nor
+        shows up in trends.
+        """
         timeout = httpx.Timeout(20.0, connect=10.0)
         times = []
         status_code = 0
@@ -86,34 +101,19 @@ class PageSpeedAuditor(BaseAuditor):
 
             avg_latency_ms = sum(times) / len(times) if times else 1000.0
 
-            # Score computation based on response latency
-            if avg_latency_ms < 250:
-                score = 95.0
-            elif avg_latency_ms < 500:
-                score = 85.0
-            elif avg_latency_ms < 1000:
-                score = 70.0
-            elif avg_latency_ms < 2000:
-                score = 50.0
-            else:
-                score = 30.0
-
-            if status_code != 200:
-                score = max(0.0, score - 30.0)
-
-            status = self._score_to_status(score)
             summary = (
-                f"PageSpeed fallback benchmark: Average TTFB/latency {avg_latency_ms:.0f}ms, "
-                f"Page size {content_length / 1024:.1f}KB (Google API key not configured)"
+                f"No performance score: PageSpeed Insights unavailable ({reason}). "
+                f"Homepage responded HTTP {status_code} in {avg_latency_ms:.0f}ms average "
+                f"({content_length / 1024:.0f}KB) — a server-response check only, not a Lighthouse result."
             )
-
             return AuditModuleResult(
                 module="pagespeed",
-                score=round(score, 1),
-                status=status,
+                score=None,
+                status="error",
                 summary=summary,
                 details={
                     "is_fallback": True,
+                    "unavailable_reason": reason,
                     "avg_response_time_ms": round(avg_latency_ms, 2),
                     "status_code": status_code,
                     "payload_size_kb": round(content_length / 1024, 2),
@@ -124,24 +124,24 @@ class PageSpeedAuditor(BaseAuditor):
             logger.error("HTTP timing fallback failed for %s: %s", self.site_url, exc)
             return AuditModuleResult(
                 module="pagespeed",
-                score=0.0,
-                status="fail",
-                summary=f"Unable to measure site response latency: {exc}",
-                details={"error": str(exc), "is_fallback": True},
+                score=None,
+                status="error",
+                summary=f"No performance score: PageSpeed Insights unavailable ({reason}); homepage fetch also failed: {exc}",
+                details={"error": str(exc), "is_fallback": True, "unavailable_reason": reason},
             )
 
     async def run(self) -> AuditModuleResult:
         # Check if PageSpeed API key is set or try calling API
         if not settings.GOOGLE_PAGESPEED_API_KEY:
             logger.info("GOOGLE_PAGESPEED_API_KEY not configured. Running timing fallback.")
-            return await self._run_http_timing_fallback()
+            return await self._run_http_timing_fallback("Google PageSpeed API key not configured in Settings")
 
         mobile_raw = await self._query_pagespeed_api("mobile")
         desktop_raw = await self._query_pagespeed_api("desktop")
 
         if not mobile_raw and not desktop_raw:
             logger.warning("Google PageSpeed API failed for both devices. Falling back to HTTP timing.")
-            return await self._run_http_timing_fallback()
+            return await self._run_http_timing_fallback(self._last_api_error or "API request failed")
 
         mobile_metrics = self._extract_lighthouse_metrics(mobile_raw) if mobile_raw else None
         desktop_metrics = self._extract_lighthouse_metrics(desktop_raw) if desktop_raw else None

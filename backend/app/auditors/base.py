@@ -23,7 +23,7 @@ _DEFAULT_REQUEST_CONCURRENCY = 6
 @dataclass
 class AuditModuleResult:
     module: str
-    score: float  # 0 - 100
+    score: float | None  # 0 - 100; None = not measured (excluded from the overall score)
     status: str   # "pass", "warn", "fail", "error"
     summary: str
     details: dict[str, Any] = field(default_factory=dict)

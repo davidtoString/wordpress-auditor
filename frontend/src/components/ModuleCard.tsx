@@ -212,7 +212,8 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
   const displayName = moduleDisplayName(modKey)
   const Icon = moduleIcon(modKey)
   const help = MODULE_HELP[modKey.toLowerCase()]
-  const score = Math.max(0, Math.min(100, Math.round(result.score || 0)))
+  const hasScore = typeof result.score === 'number' && Number.isFinite(result.score)
+  const score = hasScore ? Math.max(0, Math.min(100, Math.round(result.score as number))) : 0
 
   // SVG Circular progress params
   const radius = 22
@@ -702,7 +703,7 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
                 cx="26"
                 cy="26"
                 r={radius}
-                className={cn('transition-all duration-700 stroke-current', scoreToColor(score))}
+                className={cn('transition-all duration-700 stroke-current', hasScore ? scoreToColor(score) : 'text-slate-300 dark:text-slate-600')}
                 strokeWidth="4"
                 strokeDasharray={circumference}
                 strokeDashoffset={strokeDashoffset}
@@ -711,8 +712,8 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
               />
             </svg>
             <div className="absolute inset-0 flex items-center justify-center">
-              <span className={cn('text-xs font-bold font-mono', scoreToColor(score))}>
-                {score}
+              <span className={cn('text-xs font-bold font-mono', hasScore ? scoreToColor(score) : 'text-slate-400')}>
+                {hasScore ? score : 'n/a'}
               </span>
             </div>
           </div>

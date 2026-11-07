@@ -16,6 +16,16 @@ from app.models import AuditResult, AuditRun, Site, User
 from app.reporting import build_report_data, render_markdown
 from app.scheduler import cancel_audit_task, AUDIT_MODULES, MODULE_WEIGHTS
 
+_MODULE_ORDER = {name: i for i, name in enumerate(AUDIT_MODULES)}
+
+
+def _ordered_results(results: list) -> list:
+    """Module results in registry order. The table has no ordering column, and Postgres
+    returns updated rows in physical (not insertion) order, so without this cards jump
+    around whenever a result row is touched."""
+    return sorted(results, key=lambda r: (_MODULE_ORDER.get(r.module, len(_MODULE_ORDER)), r.module))
+
+
 router = APIRouter(prefix="/audits", tags=["audits"])
 
 
@@ -145,7 +155,7 @@ def get_audit(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit run not found")
 
     site = db.query(Site).filter(Site.id == run.site_id).first()
-    results = db.query(AuditResult).filter(AuditResult.audit_run_id == run.id).all()
+    results = _ordered_results(db.query(AuditResult).filter(AuditResult.audit_run_id == run.id).all())
 
     return AuditRunDetail(
         id=run.id,
@@ -182,7 +192,7 @@ def export_audit(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit run not found")
 
     site = db.query(Site).filter(Site.id == run.site_id).first()
-    results = db.query(AuditResult).filter(AuditResult.audit_run_id == run.id).all()
+    results = _ordered_results(db.query(AuditResult).filter(AuditResult.audit_run_id == run.id).all())
 
     report = build_report_data(site, run, results)
     site_slug = re.sub(r"[^a-z0-9]+", "-", (site.name if site else "site").lower()).strip("-") or "site"
@@ -243,7 +253,7 @@ def get_audit_results_only(
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit run not found")
 
-    results = db.query(AuditResult).filter(AuditResult.audit_run_id == run.id).all()
+    results = _ordered_results(db.query(AuditResult).filter(AuditResult.audit_run_id == run.id).all())
     return results
 
 
@@ -286,7 +296,7 @@ def get_latest_audit_for_site(
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No audits found for this site")
 
-    results = db.query(AuditResult).filter(AuditResult.audit_run_id == run.id).all()
+    results = _ordered_results(db.query(AuditResult).filter(AuditResult.audit_run_id == run.id).all())
 
     return AuditRunDetail(
         id=run.id,

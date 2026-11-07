@@ -96,9 +96,11 @@ def mark_orphaned_runs_as_failed(db: Session) -> None:
 # (or, for unlighthouse, the crawl's target paths) — a run that selects only modules without it
 # (e.g. pagespeed-only) skips the crawl entirely and is correspondingly fast.
 AUDIT_MODULES: dict[str, dict[str, Any]] = {
+    # Registry order is also the display order of module cards (see api/audits.py), so the two
+    # performance modules sit side by side at the top.
+    "pagespeed": {"label": "PageSpeed Insights", "needs_pages": False},
     "unlighthouse": {"label": "Lighthouse Performance (site-wide)", "needs_pages": True},
     "advertools": {"label": "Technical SEO (sitemap / robots / SERP)", "needs_pages": True},
-    "pagespeed": {"label": "PageSpeed Insights", "needs_pages": False},
     "seo": {"label": "On-page SEO", "needs_pages": True},
     "security": {"label": "Security & hardening", "needs_pages": True},
     "links": {"label": "Broken links & interlinking", "needs_pages": True},
