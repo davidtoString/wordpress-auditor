@@ -85,19 +85,19 @@ class ImagesAuditor(BaseAuditor):
             if resp.status_code != 200:
                 return AuditModuleResult(
                     module="images",
-                    score=0.0,
-                    status="fail",
-                    summary=f"Unable to load homepage for image audit (HTTP {resp.status_code})",
-                    details={"status_code": resp.status_code},
+                    score=None,
+                    status="error",
+                    summary=f"Not measured: homepage returned HTTP {resp.status_code}",
+                    details={"status_code": resp.status_code, "not_measured": True},
                 )
             html_body = resp.text
         except Exception as exc:
             return AuditModuleResult(
                 module="images",
-                score=0.0,
-                status="fail",
-                summary=f"Failed to fetch homepage: {exc}",
-                details={"error": str(exc)},
+                score=None,
+                status="error",
+                summary=f"Not measured: homepage fetch failed ({exc})",
+                details={"error": str(exc), "not_measured": True},
             )
 
         all_images = self._extract_page_images(html_body, self.site_url)
@@ -166,30 +166,41 @@ class ImagesAuditor(BaseAuditor):
                     "size_kb": round(size / 1024, 1),
                 })
 
-        # Calculate deductions per prompt:
-        # -5 per missing alt, -5 per non-modern format, -10 per oversized image, -3 per missing lazy load
+        # Ratio-based score. Per-image deductions across 20 pages drove every site to 0/100
+        # regardless of how bad it actually was, which carried no information. Weights: alt
+        # text 40 (accessibility + SEO), oversized files 30 (measured sample), legacy formats
+        # 20, lazy loading 10.
         missing_alt_count = len(findings["missing_alt"])
         non_modern_count = len(findings["non_modern_formats"])
         oversized_count = len(findings["oversized_images"])
         missing_lazy_count = len(findings["missing_lazy_loading"])
+        total = max(1, len(all_images))
+        probed = max(1, len(images_to_probe))
 
         deductions = (
-            (missing_alt_count * 5.0)
-            + (non_modern_count * 5.0)
-            + (oversized_count * 10.0)
-            + (missing_lazy_count * 3.0)
+            40.0 * (missing_alt_count / total)
+            + 20.0 * (non_modern_count / total)
+            + 30.0 * (oversized_count / probed)
+            + 10.0 * (missing_lazy_count / total)
         )
+        findings["ratios"] = {
+            "missing_alt_pct": round(100 * missing_alt_count / total),
+            "legacy_format_pct": round(100 * non_modern_count / total),
+            "oversized_pct_of_sampled": round(100 * oversized_count / probed),
+            "missing_lazy_pct": round(100 * missing_lazy_count / total),
+            "sampled_for_size": len(images_to_probe),
+        }
 
         score = max(0.0, min(100.0, 100.0 - deductions))
         final_score = round(score, 1)
         status = self._score_to_status(final_score)
 
         if missing_alt_count > 0:
-            issues.append(f"{missing_alt_count} images missing 'alt' attributes")
-        if non_modern_count > 0:
-            issues.append(f"{non_modern_count} images using legacy formats (JPG/PNG instead of WebP/AVIF)")
+            issues.append(f"{missing_alt_count} of {total} image tags missing 'alt' attributes")
         if oversized_count > 0:
-            issues.append(f"{oversized_count} images exceed 500KB")
+            issues.append(f"{oversized_count} of {len(images_to_probe)} sampled images exceed 500KB")
+        if non_modern_count > 0:
+            issues.append(f"{non_modern_count} of {total} images use legacy formats (JPG/PNG instead of WebP/AVIF)")
         if missing_lazy_count > 0:
             issues.append(f"{missing_lazy_count} below-the-fold images missing loading='lazy'")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html as html_lib
 import logging
 import re
@@ -8,6 +9,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.auditors.base import BaseAuditor, AuditModuleResult
+from app.auditors import wp_intel
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +46,10 @@ class WpHealthAuditor(BaseAuditor):
                 if r_resp.status_code in (403, 404):
                     readme_blocked = True
                 elif r_resp.status_code == 200 and "wordpress" in r_resp.text.lower():
+                    # readme.html has not carried the installed version since WordPress 3.x;
+                    # it only confirms the site is WordPress. (A previous regex matched
+                    # "version 2 of the License" in the GPL text and reported "version 2".)
                     readme_blocked = False
-                    match = re.search(r"version\s*([\d\.]+)", r_resp.text, re.IGNORECASE)
-                    if match:
-                        detected_version = match.group(1)
-                        version_exposed = True
                 else:
                     readme_blocked = True
         except Exception:
@@ -57,7 +58,8 @@ class WpHealthAuditor(BaseAuditor):
         if readme_blocked:
             score += 10.0
         else:
-            issues.append("/readme.html is publicly accessible and exposes WordPress information")
+            score += 7.0  # low-severity information disclosure
+            issues.append("/readme.html is publicly accessible (confirms WordPress to scanners; low severity)")
 
         # Check homepage HTML for generator tag and debug errors
         homepage_html = ""
@@ -73,18 +75,49 @@ class WpHealthAuditor(BaseAuditor):
 
         soup = BeautifulSoup(homepage_html, "lxml")
         gen_meta = soup.find("meta", attrs={"name": "generator"})
+        version_source = None
         if gen_meta and "wordpress" in gen_meta.get("content", "").lower():
             version_exposed = True
             v_match = re.search(r"wordpress\s*([\d\.]+)", gen_meta.get("content", ""), re.IGNORECASE)
             if v_match:
                 detected_version = v_match.group(1)
+                version_source = "meta generator"
+
+        # Core asset URLs carry ?ver=<core version> unless a plugin strips them; the most common
+        # one across wp-includes assets is the running core version.
+        if not detected_version:
+            vers = re.findall(r"/wp-includes/[^\s\"']+\?ver=(\d+\.\d+(?:\.\d+)?)", homepage_html)
+            if vers:
+                best = max(set(vers), key=vers.count)
+                if vers.count(best) >= 2:
+                    detected_version = best
+                    version_exposed = True
+                    version_source = "wp-includes asset ?ver= strings"
+
+        # The RSS feed's <generator> tag is the other public place core discloses its version.
+        # Used here mainly to know which core version is running (for the update and
+        # vulnerability checks below), and reported as exposure when present.
+        if not detected_version:
+            try:
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
+                    f_resp = await self._request(client, "GET", f"{self.site_url}/feed/")
+                if f_resp.status_code == 200:
+                    g = re.search(r"<generator>[^<]*wordpress\.org/\?v=([\d.]+)", f_resp.text, re.IGNORECASE)
+                    if g:
+                        detected_version = g.group(1)
+                        version_exposed = True
+                        version_source = "RSS feed generator"
+            except Exception:
+                pass
 
         findings["version_detected"] = detected_version
+        findings["version_source"] = version_source
         findings["version_exposed"] = version_exposed
         if not version_exposed:
             score += 15.0
         else:
-            issues.append(f"WordPress core version ({detected_version or 'detected'}) is publicly exposed")
+            score += 8.0
+            issues.append(f"WordPress core version {detected_version or ''} is disclosed via {version_source or 'the page'}".replace("  ", " "))
 
         # 2. User Enumeration Check (15 pts)
         user_enum_safe = True
@@ -201,6 +234,7 @@ class WpHealthAuditor(BaseAuditor):
                             (
                                 {
                                     "name": html_lib.unescape(p.get("name") or p.get("plugin") or "Unknown"),
+                                    "slug": wp_intel.plugin_slug(p.get("plugin")),
                                     "version": p.get("version"),
                                     "status": p.get("status"),
                                 }
@@ -286,8 +320,73 @@ class WpHealthAuditor(BaseAuditor):
 
         score += api_score
 
+        # 6. Versions vs the outside world: known vulnerabilities (WPVulnerability) and
+        # available updates (wordpress.org) for core and every installed plugin we know the
+        # version of. These are the findings a site owner most needs without logging in.
+        vulnerable_plugins: list[dict[str, Any]] = []
+        outdated_plugins: list[dict[str, Any]] = []
+        intel_errors = 0
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=8.0)) as intel_client:
+                core_latest = await wp_intel.core_latest_version(intel_client)
+                findings["core_latest"] = core_latest
+                if detected_version:
+                    findings["core_update_available"] = bool(core_latest) and wp_intel._cmp(detected_version, core_latest) < 0
+                    core_vulns = await wp_intel.core_vulnerabilities(intel_client, detected_version)
+                    findings["core_vulnerabilities"] = core_vulns[:10]
+                    if core_vulns:
+                        score -= 15.0
+                        issues.append(f"WordPress {detected_version} has {len(core_vulns)} known vulnerability record(s); update core")
+                    elif findings.get("core_update_available"):
+                        issues.append(f"WordPress {detected_version} is behind the current release {core_latest}")
+
+                plugins_known = [p for p in findings.get("installed_plugins", []) if p.get("slug") and p.get("version")]
+
+                async def _check(p: dict[str, Any]) -> None:
+                    nonlocal intel_errors
+                    try:
+                        vuln = await wp_intel.plugin_vulnerabilities(intel_client, p["slug"], p["version"])
+                        if not vuln.get("lookup_ok"):
+                            intel_errors += 1
+                        if vuln["affecting"]:
+                            vulnerable_plugins.append({
+                                "name": p["name"], "slug": p["slug"], "version": p["version"],
+                                "status": p["status"], "vulnerabilities": vuln["affecting"][:5],
+                            })
+                        latest = await wp_intel.plugin_latest_version(intel_client, p["slug"])
+                        if latest and wp_intel._cmp(p["version"], latest) < 0:
+                            outdated_plugins.append({"name": p["name"], "slug": p["slug"],
+                                                     "installed": p["version"], "latest": latest,
+                                                     "status": p["status"]})
+                    except Exception as exc:
+                        intel_errors += 1
+                        logger.debug("plugin intel failed for %s: %s", p.get("slug"), exc)
+
+                await asyncio.gather(*[_check(p) for p in plugins_known])
+        except Exception as exc:
+            logger.warning("WordPress intel lookups failed for %s: %s", self.site_url, exc)
+            intel_errors += 1
+
+        vulnerable_plugins.sort(key=lambda p: (p["status"] != "active", p["name"].lower()))
+        outdated_plugins.sort(key=lambda p: (p["status"] != "active", p["name"].lower()))
+        findings["vulnerable_plugins"] = vulnerable_plugins
+        findings["outdated_plugins"] = outdated_plugins
+        findings["intel_lookup_errors"] = intel_errors
+        active_vuln = [p for p in vulnerable_plugins if p["status"] == "active"]
+        if active_vuln:
+            score -= min(50.0, 25.0 * len(active_vuln))
+            names = ", ".join(f"{p['name']} {p['version']}" for p in active_vuln[:3])
+            issues.insert(0, f"{len(active_vuln)} active plugin(s) with known vulnerabilities: {names}")
+        inactive_vuln = [p for p in vulnerable_plugins if p["status"] != "active"]
+        if inactive_vuln:
+            issues.append(f"{len(inactive_vuln)} inactive plugin(s) with known vulnerabilities; update or delete them")
+        if outdated_plugins:
+            issues.append(f"{len(outdated_plugins)} plugin(s) have updates available")
+
         final_score = round(max(0.0, min(100.0, score)), 1)
         status = self._score_to_status(final_score)
+        if active_vuln and status == "pass":
+            status = "warn"
 
         if issues:
             summary = f"WordPress Health score {final_score:.0f}/100. {'; '.join(issues[:3])}"

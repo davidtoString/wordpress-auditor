@@ -124,3 +124,50 @@ async def generate_audit_summary(site_url: str, results: List[Dict[str, Any]]) -
 
     # 3. Fallback heuristic summary
     return _generate_fallback_summary(site_url, results)
+
+
+_BRIEF_NARRATIVE_PROMPT = """You are writing for the web developer who maintains this WordPress site. Below is the
+automated audit brief for {site_url}: what is broken or urgent, what changed since the previous run, what was
+resolved, and the standing improvement list. Write a short plain-text narrative (no markdown headings, no bullet
+symbols other than '-', max 180 words) that says: (1) whether anything needs action today and exactly what, with the
+URL or plugin named; (2) what changed and whether it looks intentional or like a regression; (3) the single most
+valuable improvement to schedule next. Do not restate every item. Do not invent facts not in the brief. If nothing
+is urgent and nothing changed, say so in one sentence and name the top improvement.
+
+BRIEF:
+{brief}
+"""
+
+
+async def generate_brief_narrative(site_url: str, brief_markdown: str) -> str | None:
+    """Narrative over the deterministic brief. Returns None when no AI provider is configured
+    or the call fails; the brief itself is always available without it."""
+    provider = (settings.AI_PROVIDER or "").lower().strip()
+    prompt = _BRIEF_NARRATIVE_PROMPT.format(site_url=site_url, brief=brief_markdown[:12000])
+
+    if (provider == "openai" or (not provider and settings.OPENAI_API_KEY)) and settings.OPENAI_API_KEY:
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+            completion = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=400,
+            )
+            if completion.choices and completion.choices[0].message.content:
+                return completion.choices[0].message.content.strip()
+        except Exception as exc:
+            logger.error("OpenAI brief narrative failed: %s", exc)
+
+    if (provider == "gemini" or (not provider and settings.GEMINI_API_KEY)) and settings.GEMINI_API_KEY:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=settings.GEMINI_API_KEY)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            response = await model.generate_content_async(prompt)
+            if response and response.text:
+                return response.text.strip()
+        except Exception as exc:
+            logger.error("Gemini brief narrative failed: %s", exc)
+    return None

@@ -53,6 +53,13 @@ export const AuditRunsTable: React.FC<AuditRunsTableProps> = ({
             Running...
           </span>
         )
+      case 'pending':
+        return (
+          <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 dark:text-slate-400">
+            <Clock className="w-3.5 h-3.5" />
+            Queued
+          </span>
+        )
       case 'failed':
         return (
           <span className="inline-flex items-center gap-1 text-xs font-medium text-rose-600 dark:text-rose-400">
@@ -154,7 +161,28 @@ export const AuditRunsTable: React.FC<AuditRunsTableProps> = ({
                   </td>
                 )}
                 <td className="py-3.5 px-4">
-                  <ScoreBadge score={audit.score} size="sm" showLabel />
+                  <div className="flex flex-col gap-1">
+                    <ScoreBadge score={audit.score} size="sm" showLabel />
+                    {audit.brief_stats && (
+                      <div className="flex flex-wrap gap-1">
+                        {audit.brief_stats.urgent > 0 && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-100 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300" title="Open urgent findings">
+                            {audit.brief_stats.urgent} urgent{audit.brief_stats.urgent_new ? ` (${audit.brief_stats.urgent_new} new)` : ''}
+                          </span>
+                        )}
+                        {audit.brief_stats.changes_notable > 0 && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300" title="Notable changes since the previous run">
+                            {audit.brief_stats.changes_notable} changed
+                          </span>
+                        )}
+                        {audit.brief_stats.resolved > 0 && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300">
+                            {audit.brief_stats.resolved} resolved
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </td>
                 <td className="py-3.5 px-4">
                   <div className="flex flex-col gap-0.5">

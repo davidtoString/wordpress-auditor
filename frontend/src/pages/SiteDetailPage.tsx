@@ -35,6 +35,8 @@ import type { ModuleResult, AuditScope, AuditModuleInfo } from '../lib/types'
 import ScoreBadge from '../components/ScoreBadge'
 import ModuleCard from '../components/ModuleCard'
 import AuditRunsTable from '../components/AuditRunsTable'
+import BriefPanel from '../components/BriefPanel'
+import FindingsTable from '../components/FindingsTable'
 import { formatDate, formatRelative } from '../lib/utils'
 import toast from 'react-hot-toast'
 
@@ -449,6 +451,28 @@ export const SiteDetailPage: React.FC = () => {
         </div>
       </Modal>
 
+      {/* Latest brief: what is broken, what changed, what to improve */}
+      {latestAudit?.brief && (
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Latest brief</h3>
+              <p className="text-xs text-slate-500">
+                From the run on {formatDate(latestAudit.completed_at || latestAudit.started_at)}
+                {latestAudit.brief.compared_to_at ? `, compared with ${formatDate(latestAudit.brief.compared_to_at).slice(0, 12)}` : ''}
+              </p>
+            </div>
+            <Link to={`/audits/${latestAudit.id}`} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">
+              Open run &rarr;
+            </Link>
+          </div>
+          <BriefPanel brief={latestAudit.brief} narrative={latestAudit.ai_summary} siteId={id} />
+        </div>
+      )}
+
+      {/* Findings history */}
+      {id && <FindingsTable siteId={id} />}
+
       {/* Score History Chart (Last 30 runs) */}
       <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200 dark:border-slate-700/80 p-6 shadow-sm">
         <div className="flex items-center justify-between mb-4">
@@ -502,8 +526,8 @@ export const SiteDetailPage: React.FC = () => {
         )}
       </div>
 
-      {/* AI Recommendations Section */}
-      {latestAudit?.ai_recommendations && (
+      {/* Legacy AI Recommendations Section (runs before the brief existed) */}
+      {!latestAudit?.brief && latestAudit?.ai_recommendations && (
         <div className="bg-gradient-to-br from-purple-500/10 via-brand-500/5 to-transparent rounded-2xl border border-purple-200 dark:border-purple-900/60 p-6 shadow-sm">
           <div className="flex items-center gap-2 text-purple-900 dark:text-purple-300 font-bold text-base mb-3">
             <div className="p-1.5 rounded-lg bg-purple-600 text-white">

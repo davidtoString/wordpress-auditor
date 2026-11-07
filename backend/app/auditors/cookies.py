@@ -127,10 +127,10 @@ class CookiesAuditor(BaseAuditor):
             except Exception as f_exc:
                 return AuditModuleResult(
                     module="cookies",
-                    score=50.0,
-                    status="warn",
-                    summary=f"Unable to run cookie analysis: {f_exc}",
-                    details={"error": str(f_exc)},
+                    score=None,
+                    status="error",
+                    summary=f"Not measured: cookie analysis failed ({f_exc})",
+                    details={"error": str(f_exc), "not_measured": True},
                 )
 
         findings.update(audit_data)
@@ -146,35 +146,29 @@ class CookiesAuditor(BaseAuditor):
 
         findings["tracking_cookies_set_prior_to_consent"] = tracking_cookies
 
-        score = 100.0
-
+        # Informational module. A consent banner is a GDPR/ePrivacy requirement; for the
+        # Canadian and US local businesses this app monitors it is not, so its absence is noted
+        # but not scored, and it never drives the overall score or alerts. The one thing that
+        # is a defect: a consent tool that is installed but offers no way to decline.
+        notes: list[str] = []
+        status = "pass"
+        if banner_found and not has_reject:
+            status = "warn"
+            issues.append("Consent banner is present but offers no 'Reject' or 'Manage preferences' option")
         if not banner_found:
-            score -= 35.0
-            issues.append("No cookie consent banner detected on initial landing")
-        elif not has_reject:
-            score -= 15.0
-            issues.append("Consent banner provides no explicit 'Reject' or 'Manage Preferences' option (GDPR requirement)")
-
+            notes.append("No cookie consent banner on first load")
         if tracking_cookies:
-            deduction = len(tracking_cookies) * 15.0
-            score -= deduction
-            issues.append(
-                f"Marketing/Analytics cookies ({', '.join(tracking_cookies)}) set before explicit user consent"
-            )
-
-        final_score = round(max(0.0, min(100.0, score)), 1)
-        status = self._score_to_status(final_score)
-
-        if issues:
-            summary = f"Cookie compliance score {final_score:.0f}/100. {'; '.join(issues)}"
-        else:
-            summary = "Compliant cookie configuration: Banner present with reject options, zero tracking cookies prior to consent."
+            notes.append(f"{len(tracking_cookies)} analytics/marketing cookie(s) set on load: {', '.join(tracking_cookies)}")
 
         findings["issues"] = issues
+        findings["notes"] = notes
+        findings["informational"] = True
+        summary = "Informational (not scored). " + ("; ".join(issues + notes) if (issues or notes) else
+                                                    "Consent banner present with a reject option; no tracking cookies before consent.")
 
         return AuditModuleResult(
             module="cookies",
-            score=final_score,
+            score=None,
             status=status,
             summary=summary,
             details=findings,

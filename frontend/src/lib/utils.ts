@@ -159,8 +159,10 @@ export function moduleDisplayName(module: string): string {
     accessibility: 'Accessibility (A11y)',
     a11y: 'Accessibility (A11y)',
     uptime: 'Uptime & Response',
-    contact_forms: 'Contact Forms',
+    contact_forms: 'Contact Forms & Click-to-Call',
     tracking_scripts: 'Tracking & Analytics Scripts',
+    availability: 'Availability, TLS & Email DNS',
+    visual: 'Visual Check (Screenshots)',
   }
   return map[module.toLowerCase()] || module.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
@@ -187,6 +189,8 @@ export function moduleIcon(module: string): LucideIcon {
     uptime: Activity,
     contact_forms: MailCheck,
     tracking_scripts: Radar,
+    availability: Activity,
+    visual: Eye,
   }
   return map[module.toLowerCase()] || Activity
 }

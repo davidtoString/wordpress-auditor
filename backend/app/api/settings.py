@@ -11,7 +11,7 @@ from app.config import settings
 from app.database import get_db
 from app.email.resend_client import send_test_email
 from app.models import AppSetting, Site, User
-from app.scheduler import execute_site_audit, scheduler
+from app.scheduler import dispatch_audit, scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -158,15 +158,15 @@ def get_scheduled_jobs():
 
 @router.post("/scheduler/run-all")
 def run_all_audits(
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """Trigger an immediate audit run for every active site."""
+    """Queue an audit for every active site. Runs execute one at a time through the shared
+    audit queue (previously they all started simultaneously and corrupted each other's results)."""
     active_sites = db.query(Site).filter(Site.is_active == True).all()
     for site in active_sites:
-        background_tasks.add_task(execute_site_audit, str(site.id), "manual")
+        dispatch_audit(str(site.id), "manual", "quick")
 
     return {
-        "message": f"Triggered audit jobs for {len(active_sites)} active sites",
+        "message": f"Queued audits for {len(active_sites)} active sites (they run one at a time)",
         "count": len(active_sites),
     }

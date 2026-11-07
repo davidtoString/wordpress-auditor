@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 import uuid
@@ -24,7 +25,14 @@ from app.auth.utils import get_current_user, get_password_hash
 from app.config import settings
 from app.database import Base, SessionLocal, engine
 from app.models import AuditResult, AuditRun, User
-from app.scheduler import compute_overall_score, init_scheduler_with_sites, mark_orphaned_runs_as_failed, scheduler
+from app.scheduler import (
+    compute_overall_score,
+    init_scheduler_with_sites,
+    mark_orphaned_runs_as_failed,
+    register_main_loop,
+    schedule_weekly_digest,
+    scheduler,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -149,6 +157,8 @@ async def lifespan(app: FastAPI):
     # explicit, idempotent ALTER so an upgraded backend boots against an older database.
     with engine.begin() as conn:
         conn.execute(sa.text("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS modules JSON"))
+        conn.execute(sa.text("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS brief JSON"))
+        conn.execute(sa.text("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS ai_summary TEXT"))
         # Rows written before modules used none_as_null=True hold the JSON literal 'null'
         # instead of SQL NULL, which hid those full runs from every `modules IS NULL` filter.
         conn.execute(sa.text("UPDATE audit_runs SET modules = NULL WHERE modules::text = 'null'"))
@@ -158,10 +168,13 @@ async def lifespan(app: FastAPI):
     # 2. Check and seed default administrator
     _ensure_default_admin()
 
-    # 3. Start APScheduler and load site cron jobs
+    # 3. Start APScheduler and load site cron jobs. Cron-triggered audits are handed to this
+    # event loop so every audit, scheduled or manual, goes through the same one-at-a-time queue.
+    register_main_loop(asyncio.get_running_loop())
     try:
         if not scheduler.running:
             scheduler.start()
+        schedule_weekly_digest()
         db = SessionLocal()
         try:
             load_persisted_settings(db)

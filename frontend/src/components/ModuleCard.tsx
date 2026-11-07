@@ -79,6 +79,14 @@ const MODULE_HELP: Record<string, { what: string; howToFix: string }> = {
     what: 'Checks that a real, correctly-built contact form exists on the homepage and the Contact page — without ever submitting a test message itself.',
     howToFix: 'A missing form means adding one with your form builder (Elementor, Contact Form 7, WPForms, etc.) to that page. An incomplete form (missing an email field, message field, or submit button) usually means a plugin update broke the form markup — check it by hand.',
   },
+  availability: {
+    what: 'Is the site up and reachable: DNS resolution, homepage response and latency, TLS certificate validity and expiry, and the domain\'s email authentication records (SPF, DMARC, DKIM) that decide whether contact-form notifications reach the inbox.',
+    howToFix: 'A certificate close to expiry is renewed at the host or CDN. Missing SPF/DMARC is fixed in the domain\'s DNS; most form plugins that send through Gmail, Microsoft 365, SendGrid or Postmark document the exact records to add.',
+  },
+  visual: {
+    what: 'Compares each page\'s full-page screenshot with the previous run and has a vision model review the homepage, the contact page and any page that changed noticeably, looking for broken layout, missing images, placeholder or error text, unstyled content or a modal covering the page.',
+    howToFix: 'Open the screenshot linked on each flagged page and compare with the live site. A sudden visual change after a plugin or theme update is the usual cause; roll back or fix the template.',
+  },
   tracking_scripts: {
     what: 'Inventories every analytics, advertising pixel, call-tracking, heatmap, and chat-widget script loaded on the site — Google Analytics/Tag Manager, Meta Pixel, Google Ads, CallRail, Hotjar, etc. — and flags missing tracking, deprecated Universal Analytics, likely duplicate installs, and tracking present on some scanned pages but not others.',
     howToFix: 'Add or fix tracking via whichever plugin manages it (Site Kit, GTM4WP, MonsterInsights, etc. — see "Likely Source" below) or the theme/Elementor custom-code area it was hardcoded into. Remove duplicate or legacy (Universal Analytics) installs rather than leaving them running alongside the replacement.',
@@ -302,6 +310,112 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
             </div>
           </div>
         )}
+
+        {/* Visual check: per-page screenshot diff + vision verdict */}
+        {modKey === 'visual' && result.details && typeof result.details === 'object' && Array.isArray((result.details as any).pages) && (() => {
+          const pages: any[] = [...(result.details as any).pages]
+          pages.sort((a, b) => Number(!!b.verdict?.broken) - Number(!!a.verdict?.broken) || (b.diff_ratio ?? -1) - (a.diff_ratio ?? -1))
+          return (
+            <div className="space-y-2 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-200/70 dark:border-slate-800">
+              <span className="font-semibold text-slate-800 dark:text-slate-200 block text-xs">
+                Pages ({pages.length}); sorted broken first, then most changed
+              </span>
+              <div className="max-h-72 overflow-y-auto space-y-1.5">
+                {pages.map((p, idx) => (
+                  <div key={idx} className="flex items-start gap-2.5 text-[11px] bg-white dark:bg-slate-800/80 px-2.5 py-2 rounded border border-slate-200/50 dark:border-slate-700/50">
+                    {p.screenshot_url ? (
+                      <a href={p.screenshot_url} target="_blank" rel="noopener noreferrer" className="shrink-0" title="Open full-page screenshot">
+                        <img src={p.screenshot_url} alt="" className="w-10 h-16 object-cover object-top rounded border border-slate-200 dark:border-slate-700" loading="lazy" />
+                      </a>
+                    ) : (
+                      <div className="w-10 h-16 rounded bg-slate-100 dark:bg-slate-700 shrink-0" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-slate-700 dark:text-slate-300 truncate">{p.path}</span>
+                        <span className="shrink-0 flex items-center gap-1.5">
+                          {p.verdict?.broken ? (
+                            <span className="px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 font-semibold">looks broken</span>
+                          ) : p.verdict ? (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 font-semibold">reviewed ok</span>
+                          ) : null}
+                          {typeof p.diff_ratio === 'number' ? (
+                            <span className={cn('font-mono', p.changed ? 'text-amber-600 dark:text-amber-400 font-semibold' : 'text-slate-500')}>
+                              {Math.round(p.diff_ratio * 100)}% changed
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">no baseline</span>
+                          )}
+                        </span>
+                      </div>
+                      {p.verdict?.summary && (
+                        <p className="text-slate-600 dark:text-slate-300 leading-snug mt-0.5">{p.verdict.summary}</p>
+                      )}
+                      {Array.isArray(p.verdict?.issues) && p.verdict.issues.length > 0 && (
+                        <ul className="mt-0.5 list-disc list-inside text-rose-700 dark:text-rose-300">
+                          {p.verdict.issues.slice(0, 3).map((i: any, k: number) => (
+                            <li key={k}>{i.description}{i.location ? ` (${i.location})` : ''}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )
+        })()}
+
+        {/* WordPress: vulnerable and outdated plugins get their own block */}
+        {result.details && typeof result.details === 'object' && (Array.isArray((result.details as any).vulnerable_plugins) || Array.isArray((result.details as any).outdated_plugins)) && (((result.details as any).vulnerable_plugins?.length || 0) + ((result.details as any).outdated_plugins?.length || 0) > 0) && (() => {
+          const vul: any[] = (result.details as any).vulnerable_plugins || []
+          const out: any[] = (result.details as any).outdated_plugins || []
+          return (
+            <div className="space-y-2 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-200/70 dark:border-slate-800">
+              {vul.length > 0 && (
+                <div>
+                  <span className="font-semibold text-rose-700 dark:text-rose-300 block text-xs mb-1">
+                    Plugins with known vulnerabilities ({vul.length})
+                  </span>
+                  <div className="space-y-1">
+                    {vul.map((p, idx) => (
+                      <div key={idx} className="text-[11px] bg-white dark:bg-slate-800/80 px-2.5 py-1.5 rounded border border-rose-200/60 dark:border-rose-900/50">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-slate-800 dark:text-slate-100 truncate">{p.name} <span className="font-mono text-slate-500">v{p.version}</span></span>
+                          <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-medium', p.status === 'active' ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400')}>{p.status}</span>
+                        </div>
+                        <ul className="mt-0.5 space-y-0.5">
+                          {(p.vulnerabilities || []).slice(0, 3).map((v: any, k: number) => (
+                            <li key={k} className="text-slate-600 dark:text-slate-300 truncate">
+                              {v.link ? <a href={v.link} target="_blank" rel="noopener noreferrer" className="hover:underline text-brand-700 dark:text-brand-300">{v.name}</a> : v.name}
+                              {v.cve ? <span className="text-slate-400"> · {v.cve}</span> : null}
+                              {v.fixed_in ? <span className="text-emerald-700 dark:text-emerald-400"> · fixed in {v.fixed_in}</span> : v.unfixed ? <span className="text-rose-600"> · no fix published</span> : null}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {out.length > 0 && (
+                <div>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200 block text-xs mb-1">
+                    Updates available ({out.length})
+                  </span>
+                  <div className="max-h-40 overflow-y-auto space-y-1">
+                    {out.map((p, idx) => (
+                      <div key={idx} className="flex items-center justify-between gap-2 text-[11px] bg-white dark:bg-slate-800/80 px-2.5 py-1 rounded border border-slate-200/50 dark:border-slate-700/50">
+                        <span className="text-slate-700 dark:text-slate-300 truncate">{p.name}{p.status !== 'active' ? <span className="text-slate-400"> (inactive)</span> : null}</span>
+                        <span className="font-mono text-slate-500 shrink-0">{p.installed} → <span className="text-emerald-700 dark:text-emerald-400">{p.latest}</span></span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })()}
 
         {/* Unlighthouse custom multi-page view if available */}
         {result.details && typeof result.details === 'object' && (result.details as any).site_averages && (() => {

@@ -11,6 +11,7 @@ import type {
   Settings,
   SchedulerJob,
   AuditModuleInfo,
+  Finding,
 } from './types'
 
 export const api = axios.create({
@@ -145,6 +146,10 @@ export const sites = {
       scope,
       modules: modules && modules.length > 0 ? modules : null,
     })
+    return response.data
+  },
+  async getFindings(id: string, status: 'open' | 'resolved' | 'all' = 'open'): Promise<Finding[]> {
+    const response = await api.get<Finding[]>(`/sites/${id}/findings`, { params: { status } })
     return response.data
   },
   async getHistory(id: string, page?: number): Promise<{ audits: Audit[]; total?: number }> {

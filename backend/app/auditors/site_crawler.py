@@ -192,11 +192,17 @@ async def discover_target_pages(
     else:  # "full"
         target = (result.pages + result.posts + result.other)[:FULL_SAFETY_CAP]
 
+    # Keep each URL exactly as the sitemap publishes it (trailing slash included). Stripping
+    # the slash made every page fetch and every Lighthouse run start with a 301, doubling the
+    # request load on the client site and adding a redirect to each performance measurement.
     target_urls = [site_url]
+    seen = {site_url}
     for u in target:
-        u_clean = u.rstrip("/")
-        if u_clean != site_url and u_clean not in target_urls:
-            target_urls.append(u_clean)
+        key = u.rstrip("/")
+        if key == site_url or key in seen:
+            continue
+        seen.add(key)
+        target_urls.append(u)
 
     result.target_urls = target_urls
     return result

@@ -248,3 +248,120 @@ async def send_test_email(to_email: str) -> dict[str, Any] | None:
     """
     html = _render_layout("Resend Test Notification", content)
     return await _send_mail(to_email, "WP Site Auditor - Resend Test Email", html)
+
+
+# ----------------------------------------------------------------------------- brief emails
+
+_SEV_COLORS = {
+    "critical": ("#7f1d1d", "#fee2e2"), "high": ("#b91c1c", "#fee2e2"), "medium": ("#b45309", "#fef3c7"),
+    "low": ("#1d4ed8", "#dbeafe"), "info": ("#475569", "#f1f5f9"),
+}
+
+
+def _esc(text: Any) -> str:
+    return (str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _sev_pill(sev: str) -> str:
+    fg, bg = _SEV_COLORS.get(sev, _SEV_COLORS["info"])
+    return (f'<span style="display:inline-block;padding:1px 8px;border-radius:9999px;font-size:11px;'
+            f'font-weight:700;color:{fg};background:{bg};text-transform:uppercase;">{_esc(sev)}</span>')
+
+
+def _items_html(items: list[dict[str, Any]], empty: str, show_new: bool = True, limit: int = 40) -> str:
+    if not items:
+        return f'<p style="color:#64748b;font-size:14px;margin:6px 0 0;">{_esc(empty)}</p>'
+    rows = []
+    for i in items[:limit]:
+        new = ' <span style="color:#059669;font-weight:700;font-size:11px;">NEW</span>' if (show_new and i.get("is_new")) else ""
+        since = ""
+        if i.get("first_seen_at") and not i.get("is_new"):
+            since = f' <span style="color:#94a3b8;font-size:11px;">since {_esc(i["first_seen_at"][:10])}</span>'
+        url = f'<div style="font-size:11px;color:#64748b;word-break:break-all;">{_esc(i["url"])}</div>' if i.get("url") else ""
+        rows.append(f'<li style="margin:0 0 8px;">{_sev_pill(i.get("severity", "info"))} '
+                    f'<span style="font-size:14px;color:#1e293b;">{_esc(i.get("title"))}</span>{new}{since}{url}</li>')
+    more = f'<li style="color:#64748b;font-size:12px;">and {len(items) - limit} more in the app</li>' if len(items) > limit else ""
+    return f'<ul style="list-style:none;padding:0;margin:8px 0 0;">{"".join(rows)}{more}</ul>'
+
+
+def _section(title: str, body: str, color: str = "#0f172a") -> str:
+    return (f'<h3 style="margin:22px 0 4px;color:{color};font-size:15px;border-bottom:1px solid #e2e8f0;'
+            f'padding-bottom:4px;">{_esc(title)}</h3>{body}')
+
+
+async def send_brief_email(
+    to_email: str, site_name: str, site_url: str, audit_run_id: str, brief: dict[str, Any],
+    overall_score: Optional[float], ai_summary: Optional[str] = None,
+) -> dict[str, Any] | None:
+    """The per-run brief: only sent when something is new, changed or resolved."""
+    report_url = f"{settings.FRONTEND_URL}/audits/{audit_run_id}"
+    st = brief.get("stats") or {}
+    urgent, changes, improve, resolved = brief.get("urgent") or [], brief.get("changes") or [], brief.get("improve") or [], brief.get("resolved") or []
+
+    headline_bits = []
+    if st.get("urgent_new"):
+        headline_bits.append(f"{st['urgent_new']} new urgent")
+    elif st.get("urgent"):
+        headline_bits.append(f"{st['urgent']} urgent open")
+    if st.get("changes_notable"):
+        headline_bits.append(f"{st['changes_notable']} notable change(s)")
+    if resolved:
+        headline_bits.append(f"{len(resolved)} resolved")
+    headline = ", ".join(headline_bits) or "update"
+
+    text_color, bg_color = _get_score_badge(overall_score)
+    score_html = (f'<span class="badge" style="background-color:{bg_color}; color:{text_color};">'
+                  f'{overall_score:.0f} / 100</span>') if overall_score is not None else ""
+    compared = f' (compared with {_esc(brief["compared_to_at"][:10])})' if brief.get("compared_to_at") else ""
+    ai_html = ""
+    if ai_summary:
+        ai_html = (f'<div style="background:#f8fafc;border-left:4px solid #3b82f6;border-radius:4px;padding:12px 14px;'
+                   f'margin-top:18px;font-size:14px;line-height:1.55;color:#334155;white-space:pre-wrap;">{_esc(ai_summary)}</div>')
+    notes_html = ""
+    if brief.get("notes"):
+        notes_html = _section("Not measured this run", _items_html(
+            [{"severity": "info", "title": n} for n in brief["notes"]], "", show_new=False), "#64748b")
+
+    content = f"""
+      <h2 style="margin:0 0 4px;color:#0f172a;">{_esc(site_name)}: {_esc(headline)}</h2>
+      <p style="margin:0;color:#64748b;font-size:13px;"><a href="{_esc(site_url)}" style="color:#2563eb;">{_esc(site_url)}</a>
+        &nbsp;·&nbsp; composite score {score_html}</p>
+      {_section("Broken or urgent now", _items_html(urgent, "Nothing urgent."), "#b91c1c")}
+      {_section("Changed since last run" + compared, _items_html(changes, "No changes detected." if not brief.get("first_run") else "First run: nothing to compare against yet.", show_new=False), "#b45309")}
+      {_section("Resolved", _items_html(resolved, "", show_new=False), "#047857") if resolved else ""}
+      {_section("Improve (open items)", _items_html(improve, "Nothing outstanding.", limit=15), "#1d4ed8")}
+      {notes_html}
+      {ai_html}
+      <div style="text-align:center;margin-top:28px;"><a href="{_esc(report_url)}" class="btn">Open the full brief</a></div>
+    """
+    html = _render_layout(f"{site_name}: {headline}", content)
+    prefix = "⚠️ " if st.get("urgent_new") else ""
+    return await _send_mail(to_email, f"{prefix}{site_name}: {headline}", html)
+
+
+async def send_weekly_digest_email(to_email: str, items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    rows = []
+    for it in items:
+        urgent = it.get("urgent") or []
+        score = it.get("score")
+        text_color, bg_color = _get_score_badge(score)
+        state = ("Broken" if any(f.severity == "critical" for f in urgent) else "Attention" if urgent else "OK")
+        state_color = {"Broken": "#b91c1c", "Attention": "#b45309", "OK": "#047857"}[state]
+        top = "".join(f'<div style="font-size:12px;color:#475569;">{_sev_pill(f.severity)} {_esc(f.title)}</div>' for f in urgent[:3])
+        rows.append(f"""
+          <tr>
+            <td><a href="{_esc(settings.FRONTEND_URL)}/sites/{_esc(it["site_id"])}" style="color:#0f172a;font-weight:600;text-decoration:none;">{_esc(it["site_name"])}</a>
+              <div style="font-size:11px;color:#94a3b8;">{_esc(it["site_url"])}</div>{top}</td>
+            <td style="text-align:center;font-weight:700;color:{state_color};">{state}</td>
+            <td style="text-align:center;">{len(urgent)} / {it.get("improve_count", 0)}</td>
+            <td style="text-align:center;"><span class="badge" style="background:{bg_color};color:{text_color};font-size:13px;">{f"{score:.0f}" if score is not None else "n/a"}</span></td>
+          </tr>""")
+    content = f"""
+      <h2 style="margin:0 0 4px;color:#0f172a;">Weekly site digest</h2>
+      <p style="margin:0 0 12px;color:#64748b;font-size:13px;">{len(items)} monitored site(s). Urgent / improve counts are open findings.</p>
+      <table><thead><tr><th>Site</th><th style="text-align:center;">State</th><th style="text-align:center;">Urgent / Improve</th><th style="text-align:center;">Score</th></tr></thead>
+      <tbody>{"".join(rows)}</tbody></table>
+      <div style="text-align:center;margin-top:24px;"><a href="{_esc(settings.FRONTEND_URL)}" class="btn">Open dashboard</a></div>
+    """
+    html = _render_layout("Weekly site digest", content)
+    return await _send_mail(to_email, f"Weekly site digest: {len(items)} sites", html)

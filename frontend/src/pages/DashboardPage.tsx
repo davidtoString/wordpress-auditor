@@ -100,10 +100,11 @@ export const DashboardPage: React.FC = () => {
         )
       : 0
 
-  // Critical sites (score < 50)
-  const criticalSites = siteList.filter(
-    (s) => s.last_score !== null && s.last_score !== undefined && s.last_score < 50
-  )
+  // Sites that need a look: open urgent findings, or notable changes in the last run. Sorted
+  // broken first, then by how many urgent items are open.
+  const attentionSites = siteList
+    .filter((s) => s.state === 'broken' || s.state === 'attention')
+    .sort((a, b) => Number(b.state === 'broken') - Number(a.state === 'broken') || (b.open_urgent || 0) - (a.open_urgent || 0))
 
   // Score distribution data for recharts
   const distributionMap = {
@@ -269,15 +270,15 @@ export const DashboardPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Critical Issues Section (if any sites < 50) */}
-      {criticalSites.length > 0 && (
+      {/* Needs attention: sites with open urgent findings or notable changes in their last run */}
+      {attentionSites.length > 0 && (
         <div className="bg-rose-50/70 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/60 rounded-2xl p-5 shadow-sm">
           <div className="flex items-center gap-2 mb-3 text-rose-800 dark:text-rose-300 font-bold text-sm">
             <AlertTriangle className="w-5 h-5 text-rose-600 dark:text-rose-400" />
-            <span>Critical Issues Attention Needed ({criticalSites.length} Sites With Score &lt; 50)</span>
+            <span>Needs attention ({attentionSites.length} of {siteList.length} sites)</span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {criticalSites.map((site) => (
+            {attentionSites.map((site) => (
               <div
                 key={site.id}
                 className="bg-white dark:bg-slate-900 p-3.5 rounded-xl border border-rose-200/80 dark:border-rose-900/60 flex items-center justify-between shadow-sm"
@@ -290,6 +291,23 @@ export const DashboardPage: React.FC = () => {
                     {site.name}
                   </Link>
                   <span className="text-xs text-slate-400 truncate block">{site.url}</span>
+                  <div className="flex flex-wrap gap-1 mt-1.5">
+                    {(site.open_urgent || 0) > 0 && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300">
+                        {site.open_urgent} urgent
+                      </span>
+                    )}
+                    {(site.new_last_run || 0) > 0 && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
+                        {site.new_last_run} new
+                      </span>
+                    )}
+                    {(site.changes_last_run || 0) > 0 && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300">
+                        {site.changes_last_run} changed
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <ScoreBadge score={site.last_score} size="sm" />
@@ -408,7 +426,23 @@ export const DashboardPage: React.FC = () => {
                           {site.url}
                         </span>
                       </div>
-                      <ScoreBadge score={site.last_score} size="sm" />
+                      <div className="flex flex-col items-end gap-1 shrink-0">
+                        <ScoreBadge score={site.last_score} size="sm" />
+                        {site.state && (
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${
+                              site.state === 'broken'
+                                ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300'
+                                : site.state === 'attention'
+                                  ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300'
+                                  : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                            }`}
+                            title={`${site.open_urgent || 0} urgent open, ${site.open_improve || 0} to improve`}
+                          >
+                            {site.state === 'attention' ? 'attention' : site.state}
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     <div className="mt-3 pt-2 border-t border-slate-200/60 dark:border-slate-800 flex items-center justify-between text-[11px] text-slate-500">

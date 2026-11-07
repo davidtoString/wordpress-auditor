@@ -106,8 +106,11 @@ class RedirectsAuditor(BaseAuditor):
                 else:
                     canonical_issues += 1
                     issues.append("HTTP version does not redirect to HTTPS")
-            except Exception:
-                pass
+            except Exception as exc:
+                # Could not reach the plain-HTTP origin at all (port 80 closed, or our request
+                # was throttled). Say so instead of silently scoring it as fine.
+                findings["http_redirect"]["error"] = f"{type(exc).__name__}"
+                findings["http_redirect"]["inconclusive"] = True
 
             # 3. Collect up to 20 candidate URLs from sitemap / homepage
             urls_to_test = [self.site_url]
@@ -167,8 +170,11 @@ class RedirectsAuditor(BaseAuditor):
 
         if issues:
             summary = f"Redirects score {final_score:.0f}/100. Issues: {'; '.join(issues[:3])}"
+        elif findings["http_redirect"].get("inconclusive"):
+            summary = ("No redirect issues on the URLs traced; the plain-HTTP to HTTPS check could not "
+                       "be completed this run.")
         else:
-            summary = "Clean redirect architecture: Canonical www/https rules enforced with direct 301 status codes and zero redirect chains."
+            summary = "Clean redirect architecture: www and HTTPS canonical redirects in place, direct 301s, no chains."
 
         findings["issues"] = issues
 

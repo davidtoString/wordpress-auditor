@@ -97,6 +97,12 @@ class SiteResponse(BaseModel):
     last_audit_at: Optional[datetime] = None
     last_status: Optional[str] = None
     url_redirect_warning: Optional[str] = None
+    # Monitoring state derived from open findings and the latest full run's brief.
+    open_urgent: int = 0
+    open_improve: int = 0
+    new_last_run: int = 0
+    changes_last_run: int = 0
+    state: Optional[str] = None  # "broken" | "attention" | "ok" | None (never audited)
 
 
 class AuditRunSummary(BaseModel):
@@ -121,8 +127,16 @@ def list_sites(
     db: Session = Depends(get_db),
 ):
     """List all sites with their latest audit status and score."""
+    from app.models import Finding
+
     sites = db.query(Site).order_by(Site.created_at.desc()).all()
     results = []
+    open_counts: dict = {}
+    for f in db.query(Finding).filter(Finding.status == "open").all():
+        c = open_counts.setdefault(f.site_id, {"urgent": 0, "improve": 0, "critical": 0})
+        c["urgent" if f.section == "urgent" else "improve"] += 1
+        if f.severity == "critical":
+            c["critical"] += 1
 
     for site in sites:
         # Headline score/status come from the latest *full* run; partial (module-subset) runs
@@ -150,6 +164,16 @@ def list_sites(
             "last_audit_at": latest_run.completed_at or latest_run.created_at if latest_run else None,
             "last_status": latest_run.status if latest_run else None,
         }
+        counts = open_counts.get(site.id, {"urgent": 0, "improve": 0, "critical": 0})
+        stats = ((latest_run.brief or {}).get("stats") or {}) if latest_run and isinstance(latest_run.brief, dict) else {}
+        s_dict.update({
+            "open_urgent": counts["urgent"],
+            "open_improve": counts["improve"],
+            "new_last_run": (stats.get("urgent_new") or 0) + (stats.get("improve_new") or 0),
+            "changes_last_run": stats.get("changes_notable") or 0,
+            "state": (None if not latest_run else "broken" if counts["critical"] else
+                      "attention" if (counts["urgent"] or stats.get("changes_notable")) else "ok"),
+        })
         results.append(SiteResponse(**s_dict))
 
     return results
@@ -441,3 +465,46 @@ def get_site_history(
         .all()
     )
     return runs
+
+
+class FindingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    type: str
+    module: str
+    severity: str
+    section: str
+    title: str
+    url: Optional[str]
+    detail: Optional[Any]
+    status: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+    resolved_at: Optional[datetime]
+    times_seen: int
+    first_seen_run_id: Optional[uuid.UUID]
+    last_seen_run_id: Optional[uuid.UUID]
+
+
+@router.get("/{site_id}/findings", response_model=List[FindingResponse])
+def list_site_findings(
+    site_id: uuid.UUID,
+    status_filter: str = Query("open", alias="status", pattern="^(open|resolved|all)$"),
+    limit: int = Query(200, ge=1, le=1000),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Open (default) or resolved findings for a site, most severe first, then oldest first."""
+    from app.findings import SEVERITY_ORDER
+    from app.models import Finding
+
+    site = db.query(Site).filter(Site.id == site_id).first()
+    if not site:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
+    q = db.query(Finding).filter(Finding.site_id == site.id)
+    if status_filter != "all":
+        q = q.filter(Finding.status == status_filter)
+    rows = q.all()
+    rows.sort(key=lambda f: (f.status != "open", SEVERITY_ORDER.get(f.severity, 9), f.first_seen_at))
+    return rows[:limit]

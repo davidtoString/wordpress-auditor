@@ -98,14 +98,25 @@ class ContactFormsAuditor(BaseAuditor):
             except Exception as exc:
                 return AuditModuleResult(
                     module="contact_forms",
-                    score=0.0,
-                    status="fail",
-                    summary=f"Failed to fetch homepage: {exc}",
-                    details={"error": str(exc)},
+                    score=None,
+                    status="error",
+                    summary=f"Not measured: homepage fetch failed ({exc})",
+                    details={"error": str(exc), "not_measured": True},
                 )
 
             home_analysis = self._analyze_forms(home_html)
             findings["homepage"] = home_analysis
+
+            # Click-to-call: for a local service business the phone link is the primary
+            # conversion path on mobile. Not scored (the form score stays as is), but surfaced.
+            home_soup = BeautifulSoup(home_html, "lxml")
+            tel_links = sorted({
+                a["href"].strip() for a in home_soup.find_all("a", href=True)
+                if a["href"].strip().lower().startswith("tel:")
+            })
+            findings["click_to_call"] = {"present": bool(tel_links), "tel_links": tel_links[:5]}
+            if not tel_links:
+                issues.append("No click-to-call (tel:) link on the homepage")
             if home_analysis["best_form"] and home_analysis["best_form"]["looks_valid"]:
                 score += 50.0
             elif home_analysis["form_count"] > 0:
@@ -147,7 +158,7 @@ class ContactFormsAuditor(BaseAuditor):
         if issues:
             summary = f"Contact form check {final_score:.0f}/100. {'; '.join(issues[:3])}"
         else:
-            summary = "Contact forms detected on both the homepage and Contact page."
+            summary = "Contact forms detected on both the homepage and Contact page; click-to-call link present."
 
         findings["issues"] = issues
         return AuditModuleResult(

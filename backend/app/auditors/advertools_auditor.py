@@ -104,14 +104,36 @@ class AdvertoolsAuditor(BaseAuditor):
         warnings: list[str] = []
         errors: list[str] = []
 
+        resp = None
+        last_exc: Exception | None = None
         async with httpx.AsyncClient(timeout=12.0, verify=False, follow_redirects=True) as client:
-            resp = await self._request(client, "GET", robots_url)
+            # One retry before concluding anything: a 429/5xx or timeout from the site's own
+            # rate limiter is not a missing robots.txt, and used to be scored as one.
+            for attempt in range(2):
+                try:
+                    resp = await self._request(client, "GET", robots_url)
+                    if resp.status_code in (200, 404):
+                        break
+                except Exception as exc:
+                    last_exc = exc
+                    resp = None
+                if attempt == 0:
+                    await asyncio.sleep(2.0)
 
-        if resp.status_code != 200:
+        if resp is None or resp.status_code not in (200, 404):
+            reason = f"HTTP {resp.status_code}" if resp is not None else f"{type(last_exc).__name__}"
+            return {
+                "status": "unknown",
+                "penalty": 0,
+                "warnings": [f"robots.txt could not be fetched ({reason}); check inconclusive this run"],
+                "sitemaps": [],
+                "inconclusive": True,
+            }
+        if resp.status_code == 404:
             return {
                 "status": "missing",
                 "penalty": 15,
-                "errors": [f"robots.txt not found (HTTP {resp.status_code})"],
+                "errors": ["robots.txt not found (HTTP 404)"],
                 "sitemaps": [],
             }
 

@@ -105,6 +105,12 @@ class AuditRun(Base):
     completed_at = sa.Column(sa.DateTime, nullable=True)
     overall_score = sa.Column(sa.Float, nullable=True)
     error_message = sa.Column(sa.Text, nullable=True)
+    # The run's brief: what is broken now, what changed since the previous full run, what to
+    # improve, plus the inventory snapshot the next run diffs against. See app/findings.py.
+    brief = sa.Column(sa.JSON(none_as_null=True), nullable=True)
+    # Narrative written by the configured AI provider from the brief (was generated and
+    # discarded before; never stored).
+    ai_summary = sa.Column(sa.Text, nullable=True)
     created_at = sa.Column(sa.DateTime, default=datetime.utcnow, nullable=False, index=True)
 
     site = relationship("Site", back_populates="audit_runs")
@@ -131,6 +137,39 @@ class AuditResult(Base):
 
     def __repr__(self) -> str:
         return f"<AuditResult {self.module} score={self.score} status={self.status}>"
+
+
+class Finding(Base):
+    """One concrete, de-duplicated problem on a site, tracked across runs. A finding is keyed
+    by a fingerprint (type + URL/subject) so the same broken link or vulnerable plugin stays one
+    row from the run that first saw it until the run that no longer sees it, at which point it
+    is resolved. This is what lets the app say "new since yesterday" and "fixed" instead of
+    re-announcing every issue on every run."""
+    __tablename__ = "findings"
+
+    id = sa.Column(GUID, primary_key=True, default=uuid.uuid4)
+    site_id = sa.Column(GUID, sa.ForeignKey("sites.id", ondelete="CASCADE"), nullable=False, index=True)
+    fingerprint = sa.Column(sa.String(64), nullable=False, index=True)
+    type = sa.Column(sa.String(80), nullable=False)
+    module = sa.Column(sa.String(100), nullable=False)
+    severity = sa.Column(sa.String(20), nullable=False)  # critical, high, medium, low, info
+    section = sa.Column(sa.String(20), nullable=False, default="improve")  # urgent | improve
+    title = sa.Column(sa.String(400), nullable=False)
+    url = sa.Column(sa.String(1000), nullable=True)
+    detail = sa.Column(sa.JSON(none_as_null=True), nullable=True)
+    status = sa.Column(sa.String(20), nullable=False, default="open", index=True)  # open | resolved
+    first_seen_run_id = sa.Column(GUID, nullable=True)
+    last_seen_run_id = sa.Column(GUID, nullable=True)
+    resolved_run_id = sa.Column(GUID, nullable=True)
+    first_seen_at = sa.Column(sa.DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at = sa.Column(sa.DateTime, default=datetime.utcnow, nullable=False)
+    resolved_at = sa.Column(sa.DateTime, nullable=True)
+    times_seen = sa.Column(sa.Integer, default=1, nullable=False)
+
+    __table_args__ = (sa.UniqueConstraint("site_id", "fingerprint", name="uq_findings_site_fingerprint"),)
+
+    def __repr__(self) -> str:
+        return f"<Finding {self.type} {self.severity} {self.status} {self.url}>"
 
 
 class AlertConfig(Base):

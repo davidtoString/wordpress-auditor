@@ -270,6 +270,8 @@ def build_report_data(site: Site | None, run: AuditRun, results: list[AuditResul
             "overall_score": run.overall_score,
         },
         "priority_actions": priority_actions,
+        "brief": {k: v for k, v in (run.brief or {}).items() if k != "inventory"} if isinstance(run.brief, dict) else None,
+        "narrative": run.ai_summary,
         "modules": modules,
         "instructions_for_agent": _AGENT_INSTRUCTIONS,
     }
@@ -351,6 +353,34 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"> {report['instructions_for_agent']}")
     lines.append("")
+
+    brief = report.get("brief")
+    if brief:
+        def _bl(i: dict[str, Any]) -> str:
+            tag = " **new**" if i.get("is_new") else ""
+            return f"- [{i.get('severity')}] {i.get('title')}{tag}" + (f" — {i.get('url')}" if i.get("url") else "")
+        lines.append("## Broken or urgent now")
+        lines.append("")
+        lines += [_bl(i) for i in brief.get("urgent") or []] or ["Nothing urgent."]
+        lines.append("")
+        lines.append("## Changed since last run")
+        lines.append("")
+        lines += [f"- [{c.get('severity')}] {c.get('title')}" for c in brief.get("changes") or []] or ["No changes detected."]
+        lines.append("")
+        if brief.get("resolved"):
+            lines.append("## Resolved")
+            lines.append("")
+            lines += [f"- {r.get('title')}" for r in brief["resolved"]]
+            lines.append("")
+        lines.append("## Improve")
+        lines.append("")
+        lines += [_bl(i) for i in brief.get("improve") or []] or ["Nothing outstanding."]
+        lines.append("")
+        if report.get("narrative"):
+            lines.append("## Summary")
+            lines.append("")
+            lines.append(report["narrative"])
+            lines.append("")
 
     lines.append("## Priority Fixes")
     lines.append("")

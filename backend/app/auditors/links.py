@@ -145,6 +145,7 @@ class LinksAuditor(BaseAuditor):
             "blocked": False,
             "redirect_count": 0,
             "error": None,
+            "unreachable": False,
         }
         try:
             # For internal links use GET (or follow redirects up to 5); for external use HEAD first
@@ -182,8 +183,11 @@ class LinksAuditor(BaseAuditor):
             else:
                 res["is_broken"] = True
         except Exception as exc:
-            res["error"] = str(exc)
-            res["is_broken"] = True
+            # A timeout or connection error on OUR side is not evidence the page is down for a
+            # visitor (under load these produced false "broken" links with status 0). Record it
+            # as unreachable/inconclusive, never as broken.
+            res["error"] = f"{type(exc).__name__}: {exc}".strip(": ")
+            res["unreachable"] = True
 
         return res
 
@@ -241,9 +245,12 @@ class LinksAuditor(BaseAuditor):
         redirect_chains: list[dict[str, Any]] = []
         ok_links: list[dict[str, Any]] = []
 
+        unreachable_links: list[dict[str, Any]] = []
         for r in results:
             if r["is_broken"]:
                 broken_links.append(r)
+            elif r.get("unreachable"):
+                unreachable_links.append(r)
             elif r["blocked"]:
                 blocked_links.append(r)
             else:
@@ -271,6 +278,7 @@ class LinksAuditor(BaseAuditor):
             f"{broken_count} broken (4xx/5xx), {chains_count} long redirect chains (>2 hops)"
             + (f", {blocked_count} blocked by WAF/rate-limiting (not counted as broken, status inconclusive)"
                if blocked_count else "")
+            + (f", {len(unreachable_links)} timed out from our side (inconclusive)" if unreachable_links else "")
             + (f". {interlinking['orphan_count']} orphan page(s) with no internal links pointing to them"
                if interlinking and interlinking["orphan_count"] else "")
             + "."
@@ -285,8 +293,12 @@ class LinksAuditor(BaseAuditor):
                 "total_tested": len(results),
                 "total_internal_found": len(all_internal_links),
                 "total_external_found": len(all_external_links),
+                # Distinct external hosts linked from the sampled pages. A new, unexpected host
+                # showing up between runs is one of the most reliable signs of injected spam.
+                "external_domains": sorted({urlparse(u).netloc.lower() for u in all_external_links if urlparse(u).netloc})[:300],
                 "broken_links": broken_links,
                 "blocked_links": blocked_links,
+                "unreachable_links": unreachable_links,
                 "redirect_chains": redirect_chains,
                 "healthy_links_count": len(ok_links),
                 "ok_samples": ok_links[:10],

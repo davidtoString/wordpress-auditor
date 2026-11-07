@@ -47,6 +47,32 @@ class PageSpeedAuditor(BaseAuditor):
             self._last_api_error = str(exc)[:200]
         return None
 
+    @staticmethod
+    def _extract_field_data(data: dict[str, Any]) -> dict[str, Any] | None:
+        """Chrome UX Report (real-user) data that PSI returns alongside the lab run. This is
+        what Google's "Core Web Vitals assessment" is based on; it is absent for low-traffic
+        URLs, in which case the origin-level block may still be present."""
+        out: dict[str, Any] = {}
+        for key, label in (("loadingExperience", "url"), ("originLoadingExperience", "origin")):
+            block = data.get(key) or {}
+            metrics = block.get("metrics") or {}
+            if not metrics:
+                continue
+            def pick(name: str) -> dict[str, Any] | None:
+                m = metrics.get(name)
+                if not m:
+                    return None
+                return {"p75": m.get("percentile"), "category": m.get("category")}
+            out[label] = {
+                "overall_category": block.get("overall_category"),
+                "lcp": pick("LARGEST_CONTENTFUL_PAINT_MS"),
+                "inp": pick("INTERACTION_TO_NEXT_PAINT"),
+                "cls": pick("CUMULATIVE_LAYOUT_SHIFT_SCORE"),
+                "fcp": pick("FIRST_CONTENTFUL_PAINT_MS"),
+                "ttfb": pick("EXPERIMENTAL_TIME_TO_FIRST_BYTE"),
+            }
+        return out or None
+
     def _extract_lighthouse_metrics(self, data: dict[str, Any]) -> dict[str, Any]:
         """Extract core web vitals and lighthouse performance metrics."""
         lighthouse = data.get("lighthouseResult", {})
@@ -160,7 +186,16 @@ class PageSpeedAuditor(BaseAuditor):
 
         mobile_score_str = f"Mobile {mobile_metrics['score']:.0f}" if mobile_metrics else "Mobile N/A"
         desktop_score_str = f"Desktop {desktop_metrics['score']:.0f}" if desktop_metrics else "Desktop N/A"
-        summary = f"Performance score: {final_score:.0f}/100 ({mobile_score_str}, {desktop_score_str})"
+        summary = f"Homepage lab score {final_score:.0f}/100 ({mobile_score_str}, {desktop_score_str})."
+
+        field = self._extract_field_data(mobile_raw or desktop_raw or {})
+        if field:
+            scope_label = "this URL" if field.get("url") else "the whole origin"
+            fd = field.get("url") or field.get("origin") or {}
+            cat = (fd.get("overall_category") or "unknown").replace("_", " ").lower()
+            summary += f" Real-user Core Web Vitals ({scope_label}): {cat}."
+        else:
+            summary += " No real-user (CrUX) data: too little Chrome traffic for Google to report."
 
         return AuditModuleResult(
             module="pagespeed",
@@ -172,5 +207,7 @@ class PageSpeedAuditor(BaseAuditor):
                 "overall_score": final_score,
                 "mobile": mobile_metrics,
                 "desktop": desktop_metrics,
+                "field_data": field,
+                "page_measured": "homepage only",
             },
         )

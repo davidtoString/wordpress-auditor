@@ -87,19 +87,19 @@ class SchemaValidatorAuditor(BaseAuditor):
             if resp.status_code != 200:
                 return AuditModuleResult(
                     module="schema",
-                    score=0.0,
-                    status="fail",
-                    summary=f"Unable to load homepage for schema validation (HTTP {resp.status_code})",
-                    details={"status_code": resp.status_code},
+                    score=None,
+                    status="error",
+                    summary=f"Not measured: homepage returned HTTP {resp.status_code}",
+                    details={"status_code": resp.status_code, "not_measured": True},
                 )
             html_body = resp.text
         except Exception as exc:
             return AuditModuleResult(
                 module="schema",
-                score=0.0,
-                status="fail",
-                summary=f"Connection failed during schema check: {exc}",
-                details={"error": str(exc)},
+                score=None,
+                status="error",
+                summary=f"Not measured: homepage fetch failed ({exc})",
+                details={"error": str(exc), "not_measured": True},
             )
 
         # Schema coverage is naturally site-wide (a site might only carry LocalBusiness markup
@@ -141,6 +141,28 @@ class SchemaValidatorAuditor(BaseAuditor):
         findings["json_ld_blocks_count"] = total_blocks
         findings["total_pages_scanned"] = len(pages_breakdown)
         findings["pages"] = pages_breakdown
+
+        # Duplicate entities on one page: the same @type emitted several times (two SEO plugins,
+        # a theme and a plugin, or a schema plugin on top of Rank Math/Yoast). Google picks one
+        # arbitrarily and the rest is wasted or conflicting. Only entity types that should be
+        # singular per page are considered.
+        singular_types = {"localbusiness", "hvacbusiness", "plumber", "electrician", "organization",
+                          "website", "webpage", "breadcrumblist", "person", "roofingcontractor",
+                          "homeandconstructionbusiness", "professionalservice", "place"}
+        duplicate_entities: list[dict[str, Any]] = []
+        def _count_types(schemas: list[dict[str, Any]]) -> dict[str, int]:
+            counts: dict[str, int] = {}
+            for s in schemas:
+                t = s.get("@type")
+                t = t[0] if isinstance(t, list) and t else t
+                if isinstance(t, str) and t.lower() in singular_types:
+                    counts[t] = counts.get(t, 0) + 1
+            return counts
+        home_counts = _count_types(self._extract_page_schemas(html_body)[1])
+        for t, n in home_counts.items():
+            if n > 1:
+                duplicate_entities.append({"url": self.site_url, "type": t, "count": n})
+        findings["duplicate_entities"] = duplicate_entities
 
         if parse_errors:
             findings["validation_errors"].extend(parse_errors)
@@ -185,6 +207,11 @@ class SchemaValidatorAuditor(BaseAuditor):
                 "has_context": bool(context),
                 "missing_fields": missing_fields,
             })
+
+        if duplicate_entities:
+            deductions += min(30.0, 10.0 * len(duplicate_entities))
+            desc = ", ".join(f"{d['type']} x{d['count']}" for d in duplicate_entities[:4])
+            issues.append(f"Duplicate schema entities on the homepage ({desc}); two plugins or the theme are both emitting structured data")
 
         # Calculate score: 20 pts per unique valid schema type found (up to 5 types = 100), minus deductions
         base_points = min(100.0, len(valid_types_found) * 20.0)

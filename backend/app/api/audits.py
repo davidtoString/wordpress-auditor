@@ -59,6 +59,8 @@ class AuditRunDetail(BaseModel):
     overall_score: Optional[float]
     error_message: Optional[str]
     created_at: datetime
+    brief: Optional[Any] = None
+    ai_summary: Optional[str] = None
     results: List[AuditResultResponse] = []
 
 
@@ -78,6 +80,12 @@ class AuditRunListItem(BaseModel):
     overall_score: Optional[float]
     error_message: Optional[str]
     created_at: datetime
+    brief_stats: Optional[Any] = None
+
+
+def _brief_stats(run: AuditRun) -> Optional[dict]:
+    b = run.brief if isinstance(run.brief, dict) else None
+    return (b or {}).get("stats") if b else None
 
 
 @router.get("", response_model=List[AuditRunListItem])
@@ -115,6 +123,7 @@ def list_audits(
             overall_score=run.overall_score,
             error_message=run.error_message,
             created_at=run.created_at,
+            brief_stats=_brief_stats(run),
         )
         result_list.append(item)
 
@@ -171,6 +180,8 @@ def get_audit(
         overall_score=run.overall_score,
         error_message=run.error_message,
         created_at=run.created_at,
+        brief=run.brief,
+        ai_summary=run.ai_summary,
         results=results,
     )
 
@@ -312,5 +323,7 @@ def get_latest_audit_for_site(
         overall_score=run.overall_score,
         error_message=run.error_message,
         created_at=run.created_at,
+        brief=run.brief,
+        ai_summary=run.ai_summary,
         results=results,
     )

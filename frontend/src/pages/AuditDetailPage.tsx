@@ -22,6 +22,7 @@ import { audits as auditsApi } from '../lib/api'
 import type { ModuleResult } from '../lib/types'
 import ScoreBadge from '../components/ScoreBadge'
 import ModuleCard from '../components/ModuleCard'
+import BriefPanel from '../components/BriefPanel'
 import { formatDate, formatRelative, moduleDisplayName } from '../lib/utils'
 import toast from 'react-hot-toast'
 
@@ -305,8 +306,13 @@ export const AuditDetailPage: React.FC = () => {
         </div>
       </div>
 
-      {/* AI Recommendations (Full text) */}
-      {audit.ai_recommendations ? (
+      {/* The brief: broken now / changed / improve, with the AI narrative on top */}
+      {audit.brief && !isInProgress && (
+        <BriefPanel brief={audit.brief} narrative={audit.ai_summary} siteId={audit.site_id} />
+      )}
+
+      {/* Legacy AI Recommendations (older runs only) */}
+      {audit.brief ? null : audit.ai_recommendations ? (
         <div className="bg-gradient-to-br from-purple-500/10 via-brand-500/5 to-transparent rounded-2xl border border-purple-200 dark:border-purple-900/60 p-6 shadow-sm space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-purple-900 dark:text-purple-300 font-bold text-base">
@@ -321,14 +327,14 @@ export const AuditDetailPage: React.FC = () => {
             {audit.ai_recommendations}
           </div>
         </div>
-      ) : (
+      ) : !isInProgress ? (
         <div className="p-4 rounded-xl bg-slate-100 dark:bg-slate-800/60 text-xs text-slate-500 flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-slate-400" />
           <span>
-            AI Recommendations were not generated for this specific run. Configure OpenAI or Gemini keys in Settings to enable automated action plans.
+            This run predates the findings brief. Newer runs show what is broken, what changed and what to improve here.
           </span>
         </div>
-      )}
+      ) : null}
 
       {/* 12 Module Results in Cards */}
       <div className="space-y-4">

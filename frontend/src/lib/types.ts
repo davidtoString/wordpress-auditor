@@ -35,6 +35,12 @@ export interface Site {
   created_at: string
   updated_at?: string
   url_redirect_warning?: string | null
+  /** Monitoring state from open findings and the latest full run's brief. */
+  open_urgent?: number
+  open_improve?: number
+  new_last_run?: number
+  changes_last_run?: number
+  state?: 'broken' | 'attention' | 'ok' | null
 }
 
 export interface SiteCreateInput {
@@ -58,8 +64,9 @@ export type AuditScope = 'quick' | 'with_posts' | 'full'
 
 export interface ModuleResult {
   module: string
-  score: number
-  status: 'pass' | 'warn' | 'fail'
+  /** null = not measured this run (excluded from the overall score). */
+  score: number | null
+  status: 'pass' | 'warn' | 'fail' | 'error'
   summary: string
   details?: Record<string, any> | Array<any> | string
   metrics?: Record<string, any>
@@ -81,7 +88,78 @@ export interface Audit {
   completed_at?: string | null
   duration_seconds?: number | null
   ai_recommendations?: string | null
+  /** Narrative written from the brief by the configured AI provider. */
+  ai_summary?: string | null
+  brief?: AuditBrief | null
+  brief_stats?: BriefStats | null
   results?: Record<string, ModuleResult> | ModuleResult[]
+}
+
+export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info'
+
+export interface BriefItem {
+  type: string
+  severity: Severity
+  title: string
+  module: string
+  section: 'urgent' | 'improve'
+  url?: string | null
+  detail?: Record<string, any>
+  fingerprint: string
+  is_new?: boolean
+  first_seen_at?: string
+  times_seen?: number
+}
+
+export interface BriefChange {
+  kind: string
+  severity: Severity
+  title: string
+  detail?: Record<string, any>
+}
+
+export interface BriefStats {
+  urgent: number
+  urgent_new: number
+  improve: number
+  improve_new: number
+  changes: number
+  changes_notable: number
+  resolved: number
+  modules_not_measured: number
+}
+
+export interface AuditBrief {
+  version: number
+  generated_at: string
+  compared_to_run_id?: string | null
+  compared_to_at?: string | null
+  first_run: boolean
+  partial?: boolean
+  urgent: BriefItem[]
+  changes: BriefChange[]
+  improve: BriefItem[]
+  resolved: { type: string; severity: Severity; title: string; url?: string | null; module: string; first_seen_at: string }[]
+  notes: string[]
+  stats: BriefStats
+}
+
+export interface Finding {
+  id: string
+  type: string
+  module: string
+  severity: Severity
+  section: 'urgent' | 'improve'
+  title: string
+  url?: string | null
+  detail?: Record<string, any> | null
+  status: 'open' | 'resolved'
+  first_seen_at: string
+  last_seen_at: string
+  resolved_at?: string | null
+  times_seen: number
+  first_seen_run_id?: string | null
+  last_seen_run_id?: string | null
 }
 
 export interface Settings {
