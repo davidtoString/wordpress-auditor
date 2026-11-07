@@ -141,7 +141,7 @@ export function statusToColor(status: string | null | undefined): string {
 
 export function moduleDisplayName(module: string): string {
   const map: Record<string, string> = {
-    unlighthouse: 'Unlighthouse (Site-Wide)',
+    unlighthouse: 'Lighthouse Performance (Site-Wide)',
     advertools: 'Technical SEO (Advertools)',
     pagespeed: 'PageSpeed',
     seo: 'SEO',

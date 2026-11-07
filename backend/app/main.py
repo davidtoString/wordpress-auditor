@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 import uuid
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -18,11 +19,12 @@ from app.api.settings import load_persisted_settings, router as settings_router
 from app.api.sites import router as sites_router
 from app.api.users import router as users_router
 from app.auth.router import router as auth_router
+from app.auditors.unlighthouse import REPORTS_BASE_DIR
 from app.auth.utils import get_current_user, get_password_hash
 from app.config import settings
 from app.database import Base, SessionLocal, engine
-from app.models import User
-from app.scheduler import init_scheduler_with_sites, mark_orphaned_runs_as_failed, scheduler
+from app.models import AuditResult, AuditRun, User
+from app.scheduler import compute_overall_score, init_scheduler_with_sites, mark_orphaned_runs_as_failed, scheduler
 
 # Configure logging
 logging.basicConfig(
@@ -31,6 +33,76 @@ logging.basicConfig(
 )
 logger = logging.getLogger("wp_auditor")
 console = Console()
+
+
+def _rescore_unlighthouse_results() -> None:
+    """One-time repair: make stored Unlighthouse scores mean site-wide Performance.
+
+    Until 2026-11-07 the module score was the four-category Lighthouse composite, which read
+    ~20 points above the Performance number in the linked report. Every stored result keeps
+    the per-category averages in details, so the Performance figure is recovered from there,
+    the result is marked score_basis="performance" (making this idempotent), and each affected
+    run's headline overall_score is recomputed with the same weights the runner uses.
+    """
+    db = SessionLocal()
+    try:
+        results = db.query(AuditResult).filter(AuditResult.module == "unlighthouse").all()
+        touched_runs: set = set()
+        for res in results:
+            details = res.details if isinstance(res.details, dict) else {}
+            if details.get("score_basis") == "performance":
+                continue
+            perf = (details.get("site_averages") or {}).get("performance")
+            if perf is None:
+                continue
+            perf = round(float(perf), 1)
+            res.details = {
+                **details,
+                "score_basis": "performance",
+                "lighthouse_composite": (details.get("site_averages") or {}).get("overall", res.score),
+                "rescored_from": res.score,
+                "report_url_label": "Homepage Lighthouse report",
+            }
+            res.score = perf
+            res.status = "pass" if perf >= 80 else ("warn" if perf >= 50 else "fail")
+            touched_runs.add(res.audit_run_id)
+
+        # Backfill per-page report links onto results written before routes carried
+        # report_url. Only the most recent run per site still has its files on disk (each run
+        # wipes the site's report folder), so missing files simply resolve to None.
+        for res in results:
+            details = res.details if isinstance(res.details, dict) else {}
+            routes = details.get("routes")
+            if not isinstance(routes, list) or all("report_url" in r for r in routes if isinstance(r, dict)):
+                continue
+            safe_domain = str(details.get("_safe_domain") or "")
+            if not safe_domain and details.get("report_url"):
+                safe_domain = str(details["report_url"]).split("/reports/")[1].split("/")[0]
+            new_routes = []
+            for r in routes:
+                if not isinstance(r, dict):
+                    new_routes.append(r)
+                    continue
+                rel = Path("reports") / str(r.get("path", "/")).strip("/") / "lighthouse.html"
+                exists = bool(safe_domain) and (REPORTS_BASE_DIR / safe_domain / rel).exists()
+                new_routes.append({**r, "report_url": f"/reports/{safe_domain}/{rel.as_posix()}" if exists else None})
+            res.details = {**details, "routes": new_routes, "pages": new_routes}
+
+        for run_id in touched_runs:
+            run = db.get(AuditRun, run_id)
+            if run is None:
+                continue
+            run.overall_score = compute_overall_score(
+                [(r.module, r.score) for r in db.query(AuditResult).filter(AuditResult.audit_run_id == run_id).all()]
+            )
+        db.commit()
+        if touched_runs:
+            logger.info("Re-scored Unlighthouse results to Performance basis across %d run(s).", len(touched_runs))
+    except Exception as exc:
+        db.rollback()
+        logger.error("Unlighthouse re-score repair failed: %s", exc)
+    finally:
+        db.close()
 
 
 def _ensure_default_admin() -> None:
@@ -81,6 +153,7 @@ async def lifespan(app: FastAPI):
         # instead of SQL NULL, which hid those full runs from every `modules IS NULL` filter.
         conn.execute(sa.text("UPDATE audit_runs SET modules = NULL WHERE modules::text = 'null'"))
     logger.info("Database schema initialized.")
+    _rescore_unlighthouse_results()
 
     # 2. Check and seed default administrator
     _ensure_default_admin()

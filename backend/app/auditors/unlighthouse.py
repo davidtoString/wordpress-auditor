@@ -205,29 +205,47 @@ class UnlighthouseAuditor(BaseAuditor):
             overall_sum += ov
 
             route_path = r.get("path", "/")
+            if not route_path.startswith("/"):
+                route_path = f"/{route_path}"
+            # unlighthouse-ci writes one Lighthouse report per route under
+            # reports/<route path>/lighthouse.html (the homepage's lands at reports/lighthouse.html).
+            route_report_rel = Path("reports") / route_path.strip("/") / "lighthouse.html"
+            route_report_url = (
+                f"/reports/{safe_domain}/{route_report_rel.as_posix()}"
+                if (output_dir / route_report_rel).exists() else None
+            )
             processed_routes.append({
                 "path": route_path,
-                "url": self.site_url + (route_path if route_path.startswith("/") else f"/{route_path}"),
+                "url": self.site_url + route_path,
                 "score": ov,
                 "performance": p,
                 "accessibility": a,
                 "best_practices": b,
                 "seo": s,
+                "report_url": route_report_url,
             })
 
         avg_perf = round(perf_sum / total_routes, 1)
         avg_a11y = round(a11y_sum / total_routes, 1)
         avg_bp = round(bp_sum / total_routes, 1)
         avg_seo = round(seo_sum / total_routes, 1)
-        final_score = round(overall_sum / total_routes, 1)
+        lighthouse_composite = round(overall_sum / total_routes, 1)
 
-        # Check if an HTML report was produced
+        # The module score IS the site-wide Performance average. The four-category composite
+        # (perf + a11y + best-practices + seo) / 4 used to be the score, which read ~20 points
+        # higher than the Performance number in the linked Lighthouse report and misled anyone
+        # using this app for performance audits. The composite is kept in details only.
+        final_score = avg_perf
+        worst = min(processed_routes, key=lambda x: x["performance"])
+
+        # Homepage report (per-route reports are linked from each route entry above)
         html_report_path = output_dir / "reports" / "lighthouse.html"
         report_url = f"/reports/{safe_domain}/reports/lighthouse.html" if html_report_path.exists() else None
 
         summary = (
-            f"Site-wide Lighthouse audit across {total_routes} page(s): "
-            f"Perf {avg_perf:.0f}%, a11y {avg_a11y:.0f}%, BestPractices {avg_bp:.0f}%, SEO {avg_seo:.0f}%"
+            f"Performance {avg_perf:.0f}/100 averaged across {total_routes} page(s); "
+            f"slowest page {worst['path']} at {worst['performance']:.0f}. "
+            f"Other Lighthouse categories: Accessibility {avg_a11y:.0f}, Best Practices {avg_bp:.0f}, SEO {avg_seo:.0f}."
         )
 
         return AuditModuleResult(
@@ -236,17 +254,20 @@ class UnlighthouseAuditor(BaseAuditor):
             status=self._score_to_status(final_score),
             summary=summary,
             details={
+                "score_basis": "performance",
                 "total_routes_scanned": total_routes,
                 "site_averages": {
                     "performance": avg_perf,
                     "accessibility": avg_a11y,
                     "best_practices": avg_bp,
                     "seo": avg_seo,
-                    "overall": final_score,
+                    "overall": lighthouse_composite,
                 },
+                "lighthouse_composite": lighthouse_composite,
                 "routes": processed_routes,
                 "pages": processed_routes,  # alias for the frontend's generic per-page view
                 "scope": self.scope,
                 "report_url": report_url,
+                "report_url_label": "Homepage Lighthouse report",
             },
         )

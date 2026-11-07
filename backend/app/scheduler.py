@@ -96,7 +96,7 @@ def mark_orphaned_runs_as_failed(db: Session) -> None:
 # (or, for unlighthouse, the crawl's target paths) — a run that selects only modules without it
 # (e.g. pagespeed-only) skips the crawl entirely and is correspondingly fast.
 AUDIT_MODULES: dict[str, dict[str, Any]] = {
-    "unlighthouse": {"label": "Lighthouse (site-wide)", "needs_pages": True},
+    "unlighthouse": {"label": "Lighthouse Performance (site-wide)", "needs_pages": True},
     "advertools": {"label": "Technical SEO (sitemap / robots / SERP)", "needs_pages": True},
     "pagespeed": {"label": "PageSpeed Insights", "needs_pages": False},
     "seo": {"label": "On-page SEO", "needs_pages": True},
@@ -124,6 +124,27 @@ def normalize_modules(modules: list[str] | None) -> list[str] | None:
         raise ValueError(f"Unknown audit module(s): {', '.join(unknown)}")
     selected = [m for m in AUDIT_MODULES if m in set(modules)]
     return None if len(selected) == len(AUDIT_MODULES) else selected
+
+
+def compute_overall_score(module_scores: list[tuple[str, float | None]]) -> float:
+    """Weighted average of module scores per MODULE_WEIGHTS.
+
+    Shared by the audit runner and by the startup repair in main.py that re-scores historical
+    runs, so both always agree on what the headline number means.
+    """
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for module, score in module_scores:
+        if module in MODULE_WEIGHTS and score is not None:
+            weight = MODULE_WEIGHTS[module]
+            weighted_sum += score * weight
+            total_weight += weight
+    if total_weight > 0:
+        return round(weighted_sum / total_weight, 1)
+    # Only unweighted ("tracked") modules ran — e.g. a NAP-only partial run — so fall back to
+    # their plain average rather than a meaningless constant.
+    scored = [s for _, s in module_scores if s is not None]
+    return round(sum(scored) / len(scored), 1) if scored else 0.0
 
 
 # Module weights for overall score calculation
@@ -359,8 +380,6 @@ async def execute_site_audit(
         # 3. Save each AuditResult to DB
         results_dicts = []
         failed_modules = []
-        weighted_score_sum = 0.0
-        total_weight_applied = 0.0
 
         for res in results:
             ar_entry = AuditResult(
@@ -387,20 +406,8 @@ async def execute_site_audit(
             if res.status in ("fail", "error", "warn") or (res.score is not None and res.score < 60):
                 failed_modules.append(res_dict)
 
-            # Accumulate weighted score
-            if res.module in MODULE_WEIGHTS and res.score is not None:
-                weight = MODULE_WEIGHTS[res.module]
-                weighted_score_sum += res.score * weight
-                total_weight_applied += weight
-
         # 4. Calculate overall weighted score
-        if total_weight_applied > 0:
-            overall_score = round(weighted_score_sum / total_weight_applied, 1)
-        else:
-            # Only unweighted ("tracked") modules ran — e.g. a NAP-only partial run — so fall
-            # back to their plain average rather than a meaningless constant.
-            scored = [r.score for r in results if r.score is not None]
-            overall_score = round(sum(scored) / len(scored), 1) if scored else 0.0
+        overall_score = compute_overall_score([(r.module, r.score) for r in results])
 
         # 5. Generate AI summary
         ai_summary = ""

@@ -28,8 +28,8 @@ interface ModuleCardProps {
 // that matter and what do I do about it", which the raw data alone doesn't convey.
 const MODULE_HELP: Record<string, { what: string; howToFix: string }> = {
   unlighthouse: {
-    what: 'Runs Google Lighthouse against each scanned page: performance, accessibility, best practices, and on-page SEO.',
-    howToFix: 'Check the per-page scores below for the weakest pages first. The full interactive Lighthouse report (link below, if available) lists every individual audit with specific fix guidance.',
+    what: 'Runs Google Lighthouse against each scanned page. The module score is the site-wide average of the Performance category only; accessibility, best practices and SEO are shown alongside but do not count toward it.',
+    howToFix: 'Start with the slowest pages in the list below; each one links to its own Lighthouse report with the individual audits and fix guidance.',
   },
   advertools: {
     what: 'Technical SEO fundamentals: robots.txt rules, XML sitemap health, and homepage title/meta description length for search snippets.',
@@ -303,61 +303,92 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
         )}
 
         {/* Unlighthouse custom multi-page view if available */}
-        {result.details && typeof result.details === 'object' && (result.details as any).site_averages && (
-          <div className="space-y-3 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-200/70 dark:border-slate-800">
-            <span className="font-semibold text-slate-800 dark:text-slate-200 block text-xs">
-              Site-Wide Multi-Page Breakdown ({((result.details as any).total_routes_scanned || 0)} pages audited):
-            </span>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <div className="bg-white dark:bg-slate-800 p-2 rounded border border-slate-200/60 dark:border-slate-700/60 text-center">
-                <span className="text-[10px] uppercase text-slate-500 dark:text-slate-400 block font-medium">Performance</span>
-                <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{((result.details as any).site_averages.performance || 0)}%</span>
+        {result.details && typeof result.details === 'object' && (result.details as any).site_averages && (() => {
+          const d = result.details as any
+          const avg = d.site_averages
+          const routes: any[] = Array.isArray(d.routes) ? [...d.routes] : []
+          // Slowest pages first: that is what a performance audit needs to act on.
+          routes.sort((a, b) => (a.performance ?? 0) - (b.performance ?? 0))
+          const perfColor = (v: number) =>
+            v >= 90 ? 'text-emerald-600 dark:text-emerald-400' : v >= 50 ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'
+          const composite = typeof d.lighthouse_composite === 'number' ? d.lighthouse_composite : avg.overall
+          return (
+            <div className="space-y-3 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-200/70 dark:border-slate-800">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="font-semibold text-slate-800 dark:text-slate-200 block text-xs">
+                  Site-wide Lighthouse results ({d.total_routes_scanned || 0} pages audited)
+                </span>
               </div>
-              <div className="bg-white dark:bg-slate-800 p-2 rounded border border-slate-200/60 dark:border-slate-700/60 text-center">
-                <span className="text-[10px] uppercase text-slate-500 dark:text-slate-400 block font-medium">Accessibility</span>
-                <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{((result.details as any).site_averages.accessibility || 0)}%</span>
-              </div>
-              <div className="bg-white dark:bg-slate-800 p-2 rounded border border-slate-200/60 dark:border-slate-700/60 text-center">
-                <span className="text-[10px] uppercase text-slate-500 dark:text-slate-400 block font-medium">Best Practices</span>
-                <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{((result.details as any).site_averages.best_practices || 0)}%</span>
-              </div>
-              <div className="bg-white dark:bg-slate-800 p-2 rounded border border-slate-200/60 dark:border-slate-700/60 text-center">
-                <span className="text-[10px] uppercase text-slate-500 dark:text-slate-400 block font-medium">SEO</span>
-                <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{((result.details as any).site_averages.seo || 0)}%</span>
-              </div>
-            </div>
-
-            {/* Routes List */}
-            {Array.isArray((result.details as any).routes) && (result.details as any).routes.length > 0 && (
-              <div className="mt-2">
-                <span className="text-[11px] font-medium text-slate-600 dark:text-slate-400 block mb-1">Crawled Routes:</span>
-                <div className="max-h-36 overflow-y-auto space-y-1">
-                  {((result.details as any).routes as any[]).map((r, idx) => (
-                    <div key={idx} className="flex items-center justify-between text-[11px] bg-white dark:bg-slate-800/80 px-2.5 py-1.5 rounded border border-slate-200/50 dark:border-slate-700/50">
-                      <span className="font-mono text-slate-700 dark:text-slate-300 truncate max-w-[200px]">{r.path}</span>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-slate-500 text-[10px]">Perf: {r.performance}%</span>
-                        <span className="font-bold text-slate-900 dark:text-slate-100">{r.score}%</span>
-                      </div>
-                    </div>
-                  ))}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <div className="bg-white dark:bg-slate-800 p-2 rounded border-2 border-brand-500/70 text-center">
+                  <span className="text-[10px] uppercase text-slate-500 dark:text-slate-400 block font-medium">Performance</span>
+                  <span className={cn('text-sm font-bold', perfColor(avg.performance || 0))}>{avg.performance || 0}</span>
+                  <span className="text-[9px] text-slate-500 dark:text-slate-400 block">= module score</span>
+                </div>
+                <div className="bg-white dark:bg-slate-800 p-2 rounded border border-slate-200/60 dark:border-slate-700/60 text-center">
+                  <span className="text-[10px] uppercase text-slate-500 dark:text-slate-400 block font-medium">Accessibility</span>
+                  <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{avg.accessibility || 0}</span>
+                </div>
+                <div className="bg-white dark:bg-slate-800 p-2 rounded border border-slate-200/60 dark:border-slate-700/60 text-center">
+                  <span className="text-[10px] uppercase text-slate-500 dark:text-slate-400 block font-medium">Best Practices</span>
+                  <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{avg.best_practices || 0}</span>
+                </div>
+                <div className="bg-white dark:bg-slate-800 p-2 rounded border border-slate-200/60 dark:border-slate-700/60 text-center">
+                  <span className="text-[10px] uppercase text-slate-500 dark:text-slate-400 block font-medium">SEO</span>
+                  <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{avg.seo || 0}</span>
                 </div>
               </div>
-            )}
+              <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                Scores are site-wide averages of each page's Lighthouse category score (0-100). The module score is the
+                Performance average only. Four-category composite for reference: {composite}.
+              </p>
 
-            {(result.details as any).report_url && (
-              <a
-                href={(result.details as any).report_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors mt-2"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                View Full Interactive Lighthouse Report
-              </a>
-            )}
-          </div>
-        )}
+              {/* Routes List, slowest first, each linking to its own Lighthouse report */}
+              {routes.length > 0 && (
+                <div className="mt-2">
+                  <span className="text-[11px] font-medium text-slate-600 dark:text-slate-400 block mb-1">
+                    Pages by Performance (slowest first):
+                  </span>
+                  <div className="max-h-48 overflow-y-auto space-y-1">
+                    {routes.map((r, idx) => (
+                      <div key={idx} className="flex items-center justify-between gap-2 text-[11px] bg-white dark:bg-slate-800/80 px-2.5 py-1.5 rounded border border-slate-200/50 dark:border-slate-700/50">
+                        {r.report_url ? (
+                          <a
+                            href={r.report_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="Open this page's Lighthouse report"
+                            className="font-mono text-brand-700 dark:text-brand-300 hover:underline truncate"
+                          >
+                            {r.path}
+                          </a>
+                        ) : (
+                          <span className="font-mono text-slate-700 dark:text-slate-300 truncate">{r.path}</span>
+                        )}
+                        <div className="flex items-center gap-3 shrink-0">
+                          <span className={cn('font-bold', perfColor(r.performance ?? 0))}>Perf {r.performance}</span>
+                          <span className="text-slate-500 text-[10px]">A11y {r.accessibility} · BP {r.best_practices} · SEO {r.seo}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {d.report_url && (
+                <a
+                  href={d.report_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors mt-2"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Homepage Lighthouse report
+                </a>
+              )}
+            </div>
+          )
+        })()}
 
         {/* Site-wide content checks (seo module, ported from OpenSEO's audit engine): one
             block per issue type with severity, explanation, the affected URLs and fix guidance. */}

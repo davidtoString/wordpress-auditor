@@ -18,7 +18,7 @@ MODULE_TITLES: dict[str, str] = {
     "cookies": "Cookie Consent / GDPR",
     "redirects": "Redirects & Canonicalization",
     "pagespeed": "Page Speed (Google PageSpeed Insights)",
-    "unlighthouse": "Lighthouse (Performance/Accessibility/Best Practices/SEO)",
+    "unlighthouse": "Lighthouse Performance (site-wide, all crawled pages)",
     "advertools": "Technical SEO (Sitemap/Robots/SERP)",
 }
 

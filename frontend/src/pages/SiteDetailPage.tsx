@@ -152,7 +152,7 @@ export const SiteDetailPage: React.FC = () => {
   const modulePresets: { label: string; modules: string[] | null }[] = [
     { label: 'All modules', modules: null },
     { label: 'PageSpeed only', modules: ['pagespeed'] },
-    { label: 'Lighthouse only', modules: ['unlighthouse'] },
+    { label: 'Lighthouse Performance only', modules: ['unlighthouse'] },
     { label: 'Technical SEO', modules: ['advertools', 'seo', 'redirects', 'schema'] },
     { label: 'Security & WP health', modules: ['security', 'wp_health'] },
   ]
