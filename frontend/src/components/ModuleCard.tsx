@@ -27,6 +27,10 @@ interface ModuleCardProps {
 // the detail popup. The raw findings below answer "what did it find"; this answers "why does
 // that matter and what do I do about it", which the raw data alone doesn't convey.
 const MODULE_HELP: Record<string, { what: string; howToFix: string }> = {
+  search_console: {
+    what: "What Google itself reports for this site: whether the homepage, contact page and top-traffic pages are indexed (URL inspection), which canonical Google chose, robots/noindex as Google sees them, sitemap status and errors, and search clicks for the last 28 days against the 28 before. Needs a service account in Settings with access to the property.",
+    howToFix: 'A key page that is not indexed is first checked for noindex/robots, then requested via URL inspection in Search Console. A clicks drop of 35%+ with no seasonal reason usually means a ranking drop, a deindexed page or a tracking/redirect change made around the same time; compare with the "Changed" section of the brief.',
+  },
   unlighthouse: {
     what: 'Runs Google Lighthouse against each scanned page. The module score is the site-wide average of the Performance category only; accessibility, best practices and SEO are shown alongside but do not count toward it.',
     howToFix: 'Start with the slowest pages in the list below; each one links to its own Lighthouse report with the individual audits and fix guidance.',
@@ -362,6 +366,134 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
                   </div>
                 ))}
               </div>
+            </div>
+          )
+        })()}
+
+        {/* Search Console: totals, inspections, sitemaps */}
+        {modKey === 'search_console' && result.details && typeof result.details === 'object' && (result.details as any).connected && (() => {
+          const d: any = result.details
+          const t = d.totals || {}
+          const pv = d.prev_totals || {}
+          const ins: any[] = Object.values(d.inspections || {})
+          const isIdx = (i: any) => i.verdict === 'PASS' || (i.coverage_state && /indexed/i.test(i.coverage_state) && !/not indexed/i.test(i.coverage_state))
+          const delta = d.clicks_delta_pct
+          return (
+            <div className="space-y-3 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-200/70 dark:border-slate-800 text-xs">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-slate-600 dark:text-slate-300">
+                <span className="font-mono text-[11px] text-slate-500">{d.property}</span>
+                <span><strong className="text-slate-800 dark:text-slate-100">{t.clicks ?? '—'}</strong> clicks
+                  {delta !== null && delta !== undefined && <span className={cn('ml-1 font-semibold', delta < -20 ? 'text-rose-600' : delta > 10 ? 'text-emerald-600' : 'text-slate-500')}>({delta > 0 ? '+' : ''}{delta}%)</span>}
+                  <span className="text-slate-400"> vs {pv.clicks ?? '—'}</span></span>
+                <span><strong className="text-slate-800 dark:text-slate-100">{t.impressions ?? '—'}</strong> impressions</span>
+                <span>CTR {t.ctr ?? '—'}%</span>
+                <span>avg. position {t.position ?? '—'}</span>
+                <span className="text-slate-400">({d.window?.start} → {d.window?.end})</span>
+              </div>
+              {ins.length > 0 && (
+                <div>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200 block mb-1">Index status of key pages</span>
+                  <div className="space-y-1">
+                    {ins.map((i: any, k: number) => (
+                      <div key={k} className="flex flex-wrap items-center gap-x-2 bg-white dark:bg-slate-800/80 px-2.5 py-1.5 rounded border border-slate-200/50 dark:border-slate-700/50">
+                        {i.error ? (
+                          <span className="text-slate-400">inspection failed</span>
+                        ) : (
+                          <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-bold uppercase', isIdx(i) ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300' : 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300')}>
+                            {isIdx(i) ? 'indexed' : 'not indexed'}
+                          </span>
+                        )}
+                        <a href={i.url} target="_blank" rel="noopener noreferrer" className="font-mono text-slate-700 dark:text-slate-200 hover:underline truncate max-w-[320px]">{(() => { try { return new URL(i.url).pathname } catch { return i.url } })()}</a>
+                        {i.coverage_state && <span className="text-slate-500">{i.coverage_state}</span>}
+                        {i.robots_state === 'DISALLOWED' && <span className="text-rose-600 font-semibold">blocked by robots.txt</span>}
+                        {i.google_canonical && i.user_canonical && i.google_canonical.replace(/\/$/, '') !== i.user_canonical.replace(/\/$/, '') && (
+                          <span className="text-amber-600" title={`Google: ${i.google_canonical}`}>canonical differs</span>
+                        )}
+                        {i.last_crawl && <span className="text-slate-400">crawled {String(i.last_crawl).slice(0, 10)}</span>}
+                        {i.link && <a href={i.link} target="_blank" rel="noopener noreferrer" className="text-brand-600 hover:underline">open in GSC</a>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {Array.isArray(d.sitemaps) && (
+                <div>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200 block mb-1">Sitemaps in Search Console ({d.sitemaps.length})</span>
+                  {d.sitemaps.length === 0 ? <span className="text-slate-500">None submitted.</span> : (
+                    <div className="space-y-0.5">
+                      {d.sitemaps.map((sm: any, k: number) => (
+                        <div key={k} className="flex flex-wrap gap-x-2 text-slate-600 dark:text-slate-300">
+                          <span className="font-mono truncate max-w-[320px]">{sm.path}</span>
+                          <span className={sm.errors ? 'text-rose-600 font-semibold' : 'text-slate-400'}>{sm.errors} errors</span>
+                          <span className="text-slate-400">{sm.warnings} warnings</span>
+                          {sm.contents?.map((c: any, j: number) => <span key={j} className="text-slate-400">{c.type}: {c.indexed}/{c.submitted} indexed</span>)}
+                          {sm.last_downloaded && <span className="text-slate-400">read {String(sm.last_downloaded).slice(0, 10)}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {Array.isArray(d.top_queries) && d.top_queries.length > 0 && (
+                <div>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200 block mb-1">Top queries</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {d.top_queries.map((q: any, k: number) => (
+                      <span key={k} className="px-2 py-0.5 rounded bg-white dark:bg-slate-800/80 border border-slate-200/50 dark:border-slate-700/50 text-slate-700 dark:text-slate-200">
+                        {q.query} <span className="text-slate-400">{q.clicks} · #{q.position}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })()}
+
+        {/* WordPress: theme, administrators, Site Health */}
+        {modKey === 'wp_health' && result.details && typeof result.details === 'object' && ((result.details as any).active_theme || (result.details as any).admin_users || (result.details as any).site_health) && (() => {
+          const d: any = result.details
+          const sh: Record<string, any> = d.site_health || {}
+          const shEntries = Object.entries(sh)
+          return (
+            <div className="space-y-2 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-200/70 dark:border-slate-800 text-xs">
+              {d.active_theme && (
+                <div className="text-slate-700 dark:text-slate-300">
+                  <span className="font-semibold text-slate-800 dark:text-slate-200">Theme:</span> {d.active_theme.name}
+                  {d.active_theme.version && <span className="font-mono text-slate-500"> v{d.active_theme.version}</span>}
+                  {d.active_theme.parent && <span className="text-slate-500"> (child of {d.active_theme.parent})</span>}
+                  {Array.isArray(d.vulnerable_themes) && d.vulnerable_themes.length > 0 && <span className="ml-2 text-rose-600 font-semibold">known vulnerability</span>}
+                  {Array.isArray(d.outdated_themes) && d.outdated_themes.length > 0 && <span className="ml-2 text-amber-600">update to {d.outdated_themes[0].latest}</span>}
+                </div>
+              )}
+              {Array.isArray(d.admin_users) && (
+                <div className="text-slate-700 dark:text-slate-300">
+                  <span className="font-semibold text-slate-800 dark:text-slate-200">Administrators ({d.admin_users.length}):</span>{' '}
+                  {d.admin_users.map((a: any, k: number) => (
+                    <span key={k} className="inline-block mr-2 font-mono" title={a.registered ? `registered ${a.registered}` : ''}>{a.username}</span>
+                  ))}
+                </div>
+              )}
+              {shEntries.length > 0 && (
+                <div>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200 block mb-1">Site Health</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {shEntries.map(([test, v]: [string, any]) => (
+                      <span
+                        key={test}
+                        title={v.description || v.error || ''}
+                        className={cn('px-2 py-0.5 rounded border text-[11px]',
+                          v.status === 'good' ? 'bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-950/40 dark:border-emerald-900 dark:text-emerald-300'
+                          : v.status === 'critical' ? 'bg-rose-50 border-rose-200 text-rose-700 dark:bg-rose-950/40 dark:border-rose-900 dark:text-rose-300'
+                          : v.status === 'recommended' ? 'bg-amber-50 border-amber-200 text-amber-700 dark:bg-amber-950/40 dark:border-amber-900 dark:text-amber-300'
+                          : 'bg-slate-100 border-slate-200 text-slate-500 dark:bg-slate-800 dark:border-slate-700')}
+                      >
+                        {v.label || test}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )
         })()}

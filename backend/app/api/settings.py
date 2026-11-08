@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 from app.auth.utils import require_admin
 from app.config import settings
 from app.database import get_db
+from app.auditors import google_sc
 from app.email.resend_client import send_test_email
 from app.models import AppSetting, Site, User
 from app.scheduler import dispatch_audit, scheduler
+from app.uptime import run_uptime_probe
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ class SettingsUpdate(BaseModel):
     GEMINI_API_KEY: Optional[str] = None
     AI_PROVIDER: Optional[str] = None
     GOOGLE_PAGESPEED_API_KEY: Optional[str] = None
+    GOOGLE_SERVICE_ACCOUNT_JSON: Optional[str] = None
     RESEND_API_KEY: Optional[str] = None
     RESEND_FROM_EMAIL: Optional[str] = None
     RESEND_FROM_NAME: Optional[str] = None
@@ -78,6 +81,11 @@ def get_settings():
         "gemini_configured": bool(settings.GEMINI_API_KEY),
         "resend_configured": bool(settings.RESEND_API_KEY),
         "pagespeed_configured": bool(settings.GOOGLE_PAGESPEED_API_KEY),
+        "google_sc_configured": google_sc.service_account() is not None,
+        "google_service_account_email": google_sc.service_account_email(),
+        "google_sc_invalid": bool(settings.GOOGLE_SERVICE_ACCOUNT_JSON) and google_sc.service_account() is None,
+        "URGENT_CONFIRM_DELAY_SECONDS": settings.URGENT_CONFIRM_DELAY_SECONDS,
+        "UPTIME_PROBE_MINUTES": settings.UPTIME_PROBE_MINUTES,
     }
 
 
@@ -104,6 +112,21 @@ def update_settings(payload: SettingsUpdate, db: Session = Depends(get_db)):
         _set_and_persist(db, "AI_PROVIDER", payload.AI_PROVIDER.strip().lower())
     if payload.GOOGLE_PAGESPEED_API_KEY is not None:
         _set_and_persist(db, "GOOGLE_PAGESPEED_API_KEY", payload.GOOGLE_PAGESPEED_API_KEY.strip())
+    if payload.GOOGLE_SERVICE_ACCOUNT_JSON is not None:
+        raw = payload.GOOGLE_SERVICE_ACCOUNT_JSON.strip()
+        if raw:
+            import json as _json
+            try:
+                info = _json.loads(raw)
+            except Exception:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail="The service account key must be the JSON file Google Cloud downloads (starts with {\"type\": \"service_account\" ...).")
+            if info.get("type") != "service_account" or not info.get("client_email") or not info.get("private_key"):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail="That JSON is not a service account key (needs type, client_email and private_key).")
+            google_sc._token_cache["token"] = None
+            google_sc._props_cache["props"] = None
+        _set_and_persist(db, "GOOGLE_SERVICE_ACCOUNT_JSON", raw)
     if payload.RESEND_API_KEY is not None:
         _set_and_persist(db, "RESEND_API_KEY", payload.RESEND_API_KEY.strip())
     if payload.RESEND_FROM_EMAIL is not None:
@@ -170,3 +193,40 @@ def run_all_audits(
         "message": f"Queued audits for {len(active_sites)} active sites (they run one at a time)",
         "count": len(active_sites),
     }
+
+
+@router.post("/test-google")
+async def test_google_connection(db: Session = Depends(get_db)):
+    """Authenticate with the saved service account and list the Search Console properties it
+    can see, matched against the monitored sites. The answer to "did I grant access right"."""
+    import httpx
+    if google_sc.service_account() is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No Google service account key saved.")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            token = await google_sc.access_token(client)
+            props = await google_sc.list_properties(client, token, force=True)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Google rejected the connection: {str(exc)[:300]}")
+    sites = db.query(Site).filter(Site.is_active == True).order_by(Site.name).all()
+    matches = []
+    for site in sites:
+        prop = google_sc.match_property(site.url, props, site.search_console_property)
+        matches.append({"site_id": str(site.id), "site": site.name, "url": site.url,
+                        "property": prop["site_url"] if prop else None,
+                        "permission": prop["permission"] if prop else None,
+                        "override": site.search_console_property})
+    return {
+        "service_account_email": google_sc.service_account_email(),
+        "properties": props,
+        "sites": matches,
+        "matched": sum(1 for m in matches if m["property"]),
+        "unmatched": [m["site"] for m in matches if not m["property"]],
+    }
+
+
+@router.post("/uptime/run-now")
+async def run_uptime_now():
+    """Probe every active site right now (same logic as the hourly job, retries included)."""
+    outcomes = await run_uptime_probe(retry_delay=20)
+    return {"checked": len(outcomes), "down": [o["url"] for o in outcomes if not o["ok"]], "outcomes": outcomes}

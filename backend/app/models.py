@@ -73,6 +73,9 @@ class Site(Base):
     nap_name = sa.Column(sa.String(255), nullable=True)
     nap_address = sa.Column(sa.Text, nullable=True)
     nap_phone = sa.Column(sa.String(100), nullable=True)
+    # Search Console property this site maps to ("sc-domain:example.com" or "https://www.example.com/").
+    # Null = auto-match against the properties the configured service account can see.
+    search_console_property = sa.Column(sa.String(255), nullable=True)
     created_at = sa.Column(sa.DateTime, default=datetime.utcnow, nullable=False)
     created_by_id = sa.Column(GUID, sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
@@ -165,11 +168,62 @@ class Finding(Base):
     last_seen_at = sa.Column(sa.DateTime, default=datetime.utcnow, nullable=False)
     resolved_at = sa.Column(sa.DateTime, nullable=True)
     times_seen = sa.Column(sa.Integer, default=1, nullable=False)
+    # Human decisions about an open finding. "acknowledged": seen, working on it, stop
+    # alerting; "snoozed": hide until mute_until; "accepted": known and accepted risk, hide
+    # for good. A muted finding stays tracked (it still resolves when the problem disappears)
+    # but leaves the urgent/improve lists and never counts towards an alert. The mute is
+    # cleared automatically if the finding resolves and later comes back.
+    mute_kind = sa.Column(sa.String(20), nullable=True)  # acknowledged | snoozed | accepted
+    mute_until = sa.Column(sa.DateTime, nullable=True)
+    mute_note = sa.Column(sa.Text, nullable=True)
+    muted_at = sa.Column(sa.DateTime, nullable=True)
+    muted_by = sa.Column(sa.String(255), nullable=True)
 
     __table_args__ = (sa.UniqueConstraint("site_id", "fingerprint", name="uq_findings_site_fingerprint"),)
 
+    @property
+    def is_muted(self) -> bool:
+        if not self.mute_kind:
+            return False
+        if self.mute_until is None:
+            return True
+        return self.mute_until > datetime.utcnow()
+
     def __repr__(self) -> str:
         return f"<Finding {self.type} {self.severity} {self.status} {self.url}>"
+
+
+class UptimeCheck(Base):
+    """One hourly availability probe of a site's homepage. ok=False means the site was down
+    for visitors (connection failure, HTTP 5xx, or WordPress's own fatal-error page), confirmed
+    by re-checks within the same probe. A 401/403/429 answer counts as up ("blocked")."""
+    __tablename__ = "uptime_checks"
+
+    id = sa.Column(GUID, primary_key=True, default=uuid.uuid4)
+    site_id = sa.Column(GUID, sa.ForeignKey("sites.id", ondelete="CASCADE"), nullable=False, index=True)
+    checked_at = sa.Column(sa.DateTime, default=datetime.utcnow, nullable=False, index=True)
+    ok = sa.Column(sa.Boolean, nullable=False)
+    status_code = sa.Column(sa.Integer, nullable=True)
+    latency_ms = sa.Column(sa.Integer, nullable=True)
+    error = sa.Column(sa.Text, nullable=True)
+    attempts = sa.Column(sa.Integer, default=1, nullable=False)
+    note = sa.Column(sa.String(100), nullable=True)  # e.g. "blocked", "wp_fatal", "db_error"
+
+
+class UptimeIncident(Base):
+    """A downtime window: opened by the first failed probe, closed by the first successful
+    one after it. The audit brief lists incidents that fell between two runs."""
+    __tablename__ = "uptime_incidents"
+
+    id = sa.Column(GUID, primary_key=True, default=uuid.uuid4)
+    site_id = sa.Column(GUID, sa.ForeignKey("sites.id", ondelete="CASCADE"), nullable=False, index=True)
+    started_at = sa.Column(sa.DateTime, nullable=False, index=True)
+    ended_at = sa.Column(sa.DateTime, nullable=True)
+    first_error = sa.Column(sa.Text, nullable=True)
+    status_code = sa.Column(sa.Integer, nullable=True)
+    checks_failed = sa.Column(sa.Integer, default=1, nullable=False)
+    notified_down = sa.Column(sa.Boolean, default=False, nullable=False)
+    notified_up = sa.Column(sa.Boolean, default=False, nullable=False)
 
 
 class AlertConfig(Base):

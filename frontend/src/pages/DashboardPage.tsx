@@ -103,8 +103,13 @@ export const DashboardPage: React.FC = () => {
   // Sites that need a look: open urgent findings, or notable changes in the last run. Sorted
   // broken first, then by how many urgent items are open.
   const attentionSites = siteList
-    .filter((s) => s.state === 'broken' || s.state === 'attention')
-    .sort((a, b) => Number(b.state === 'broken') - Number(a.state === 'broken') || (b.open_urgent || 0) - (a.open_urgent || 0))
+    .filter((s) => s.state === 'down' || s.state === 'broken' || s.state === 'attention')
+    .sort(
+      (a, b) =>
+        Number(b.state === 'down') - Number(a.state === 'down') ||
+        Number(b.state === 'broken') - Number(a.state === 'broken') ||
+        (b.open_urgent || 0) - (a.open_urgent || 0)
+    )
 
   // Score distribution data for recharts
   const distributionMap = {
@@ -431,7 +436,9 @@ export const DashboardPage: React.FC = () => {
                         {site.state && (
                           <span
                             className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${
-                              site.state === 'broken'
+                              site.state === 'down'
+                                ? 'bg-rose-600 text-white animate-pulse'
+                                : site.state === 'broken'
                                 ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300'
                                 : site.state === 'attention'
                                   ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300'

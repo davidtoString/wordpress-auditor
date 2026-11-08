@@ -65,6 +65,48 @@ def _tls_info(host: str, port: int = 443) -> dict[str, Any]:
             "protocol": proto, "san_count": len(sans)}
 
 
+RDAP_BOOTSTRAP = "https://rdap.org/domain/"
+
+
+async def domain_expiry(domain: str) -> dict[str, Any]:
+    """Registration expiry via RDAP (rdap.org redirects to the registry's server; CIRA for
+    .ca, Verisign for .com/.net). Free, keyless, authoritative. A missed renewal takes the
+    whole business offline, and nothing else in the audit would notice until it happened."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0), follow_redirects=True) as client:
+            resp = await client.get(RDAP_BOOTSTRAP + domain, headers={"Accept": "application/rdap+json",
+                                                                       "User-Agent": "wpaudit/1.0"})
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    if resp.status_code == 404:
+        return {"ok": False, "error": "domain not found in RDAP"}
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"RDAP HTTP {resp.status_code}"}
+    try:
+        data = resp.json()
+    except Exception:
+        return {"ok": False, "error": "RDAP response was not JSON"}
+    expires = None
+    for ev in data.get("events") or []:
+        if ev.get("eventAction") == "expiration" and ev.get("eventDate"):
+            expires = ev["eventDate"]
+    registrar = None
+    for ent in data.get("entities") or []:
+        if "registrar" in (ent.get("roles") or []):
+            for item in (ent.get("vcardArray") or [None, []])[1] or []:
+                if isinstance(item, list) and item and item[0] == "fn" and len(item) > 3:
+                    registrar = item[3]
+    days_left = None
+    if expires:
+        try:
+            exp = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+            days_left = (exp - datetime.now(timezone.utc)).days
+        except Exception:
+            pass
+    return {"ok": True, "expires": expires, "days_left": days_left, "registrar": registrar,
+            "status": data.get("status") or [], "source": str(resp.url)}
+
+
 def _dns_txt(name: str) -> list[str]:
     import dns.resolver
     try:
@@ -173,6 +215,17 @@ class AvailabilityAuditor(BaseAuditor):
                     issues.append(f"TLS certificate expires in {tls['days_left']} days")
                     status = "fail" if tls["days_left"] <= 3 else ("warn" if status == "pass" else status)
 
+        # Domain registration expiry
+        try:
+            reg = await domain_expiry(domain)
+            details["registration"] = reg
+            if reg.get("ok") and reg.get("days_left") is not None:
+                if reg["days_left"] <= 30:
+                    issues.append(f"Domain registration expires in {reg['days_left']} days")
+                    status = "fail" if reg["days_left"] <= 7 else ("warn" if status == "pass" else status)
+        except Exception as exc:
+            details["registration"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
         # Email authentication DNS
         try:
             mail = await asyncio.to_thread(_email_auth, domain)
@@ -200,6 +253,9 @@ class AvailabilityAuditor(BaseAuditor):
             summary_bits.append(f"HTTP {details['http_status']} in {details.get('http_latency_ms', 0)}ms")
         if tls.get("ok"):
             summary_bits.append(f"TLS valid {tls.get('days_left')} more days ({tls.get('issuer') or 'unknown issuer'})")
+        reg = details.get("registration") or {}
+        if reg.get("ok") and reg.get("days_left") is not None:
+            summary_bits.append(f"domain registered {reg['days_left']} more days")
         mail = details.get("email_auth") or {}
         if mail:
             summary_bits.append(

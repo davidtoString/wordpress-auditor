@@ -163,6 +163,7 @@ export function moduleDisplayName(module: string): string {
     tracking_scripts: 'Tracking & Analytics Scripts',
     availability: 'Availability, TLS & Email DNS',
     visual: 'Visual Check (Screenshots)',
+    search_console: 'Google Search Console',
   }
   return map[module.toLowerCase()] || module.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
@@ -191,6 +192,7 @@ export function moduleIcon(module: string): LucideIcon {
     tracking_scripts: Radar,
     availability: Activity,
     visual: Eye,
+    search_console: Search,
   }
   return map[module.toLowerCase()] || Activity
 }

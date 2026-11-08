@@ -12,9 +12,12 @@ import {
   CheckCircle2,
   Sparkles,
   Gauge,
+  Search,
+  Activity,
+  AlertTriangle,
 } from 'lucide-react'
 import { settings as settingsApi } from '../lib/api'
-import type { Settings } from '../lib/types'
+import type { Settings, GoogleTestResult } from '../lib/types'
 import { formatDate } from '../lib/utils'
 import toast from 'react-hot-toast'
 
@@ -41,6 +44,8 @@ export const SettingsPage: React.FC = () => {
   const [aiProvider, setAiProvider] = useState<'openai' | 'gemini'>('openai')
   const [pagespeedKey, setPagespeedKey] = useState('')
   const [resendKey, setResendKey] = useState('')
+  const [googleJson, setGoogleJson] = useState('')
+  const [googleTest, setGoogleTest] = useState<GoogleTestResult | null>(null)
   const [resendFromEmail, setResendFromEmail] = useState('')
   const [resendFromName, setResendFromName] = useState('')
   const [alertEmail, setAlertEmail] = useState('')
@@ -74,6 +79,7 @@ export const SettingsPage: React.FC = () => {
       setGeminiKey('')
       setPagespeedKey('')
       setResendKey('')
+      setGoogleJson('')
       queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
     onError: (err: any) => {
@@ -90,6 +96,25 @@ export const SettingsPage: React.FC = () => {
     onError: (err: any) => {
       toast.error(err.response?.data?.detail || 'Failed to send test email')
     },
+  })
+
+  const testGoogleMutation = useMutation({
+    mutationFn: () => settingsApi.testGoogle(),
+    onSuccess: (res) => {
+      setGoogleTest(res)
+      toast.success(`Google OK: ${res.properties.length} properties visible, ${res.matched} of ${res.sites.length} sites matched`)
+    },
+    onError: (err: any) => toast.error(err.response?.data?.detail || 'Google connection failed'),
+  })
+
+  const uptimeNowMutation = useMutation({
+    mutationFn: () => settingsApi.runUptimeNow(),
+    onSuccess: (res) => {
+      if (res.down.length) toast.error(`${res.down.length} site(s) down: ${res.down.join(', ')}`)
+      else toast.success(`All ${res.checked} sites answered`)
+      queryClient.invalidateQueries({ queryKey: ['sites'] })
+    },
+    onError: (err: any) => toast.error(err.response?.data?.detail || 'Probe failed'),
   })
 
   // Run All Audits Mutation
@@ -119,6 +144,7 @@ export const SettingsPage: React.FC = () => {
     if (geminiKey.trim()) payload.GEMINI_API_KEY = geminiKey.trim()
     if (pagespeedKey.trim()) payload.GOOGLE_PAGESPEED_API_KEY = pagespeedKey.trim()
     if (resendKey.trim()) payload.RESEND_API_KEY = resendKey.trim()
+    if (googleJson.trim()) payload.GOOGLE_SERVICE_ACCOUNT_JSON = googleJson.trim()
 
     saveMutation.mutate(payload)
   }
@@ -299,6 +325,112 @@ export const SettingsPage: React.FC = () => {
           </div>
         </div>
 
+        {/* Section 2b: Google Search Console (service account) */}
+        <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200 dark:border-slate-700/80 p-6 shadow-sm space-y-4">
+          <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-700/60">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-lg bg-sky-50 dark:bg-sky-950/60 text-sky-600">
+                <Search className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">Google Search Console</h3>
+                <p className="text-xs text-slate-400">
+                  Index status of key pages, search clicks trend, sitemap errors, Google's chosen canonical. One service account for every site.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => testGoogleMutation.mutate()}
+              disabled={testGoogleMutation.isPending || !settingsData?.google_sc_configured}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 transition-colors disabled:opacity-60"
+            >
+              {testGoogleMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+              Test connection
+            </button>
+          </div>
+
+          <div className="p-3 rounded-xl bg-sky-50/70 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-900/50 text-xs text-sky-900 dark:text-sky-200 space-y-1">
+            <p className="font-semibold">Setup (once):</p>
+            <ol className="list-decimal ml-4 space-y-0.5">
+              <li>Google Cloud Console → a project → <strong>APIs &amp; Services → Enable</strong> the <em>Google Search Console API</em>.</li>
+              <li><strong>IAM &amp; Admin → Service Accounts → Create</strong>; then <strong>Keys → Add key → JSON</strong>. Paste the downloaded file below.</li>
+              <li>
+                In Search Console, open each property → <strong>Settings → Users and permissions → Add user</strong> with the service account
+                e-mail{settingsData?.google_service_account_email ? <> (<code className="font-mono">{settingsData.google_service_account_email}</code>)</> : ''}, permission
+                <em> Full</em> (URL inspection needs Full or Owner).
+              </li>
+            </ol>
+            <p className="text-sky-800/80 dark:text-sky-300/80">
+              The API does not expose the Manual actions or Security issues reports; those stay in the Search Console UI.
+            </p>
+          </div>
+
+          <div>
+            <label className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+              <span>Service account key (JSON)</span>
+              {settingsData?.google_sc_configured && (
+                <span className="inline-flex items-center gap-1 normal-case font-medium text-emerald-600 dark:text-emerald-400">
+                  <CheckCircle2 className="w-3 h-3" />
+                  Saved: {settingsData.google_service_account_email}
+                </span>
+              )}
+              {settingsData?.google_sc_invalid && (
+                <span className="inline-flex items-center gap-1 normal-case font-medium text-rose-600">
+                  <AlertTriangle className="w-3 h-3" />
+                  Saved value is not a valid key
+                </span>
+              )}
+            </label>
+            <textarea
+              value={googleJson}
+              onChange={(e) => setGoogleJson(e.target.value)}
+              rows={4}
+              spellCheck={false}
+              placeholder={settingsData?.google_sc_configured ? 'Leave blank to keep the saved key; paste a new JSON file to replace it' : '{ "type": "service_account", "project_id": "...", "private_key": "-----BEGIN PRIVATE KEY-----...", "client_email": "...@....iam.gserviceaccount.com", ... }'}
+              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
+            />
+          </div>
+
+          {googleTest && (
+            <div className="text-xs space-y-2">
+              <div className="font-semibold text-slate-700 dark:text-slate-200">
+                {googleTest.properties.length} propert{googleTest.properties.length === 1 ? 'y' : 'ies'} visible to {googleTest.service_account_email}
+              </div>
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="text-slate-400 uppercase border-b border-slate-200 dark:border-slate-700">
+                    <th className="py-1.5 pr-3">Site</th>
+                    <th className="py-1.5 pr-3">Matched property</th>
+                    <th className="py-1.5">Permission</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {googleTest.sites.map((m) => (
+                    <tr key={m.site_id}>
+                      <td className="py-1.5 pr-3 text-slate-700 dark:text-slate-200">{m.site}</td>
+                      <td className="py-1.5 pr-3 font-mono">
+                        {m.property ? <span className="text-emerald-700 dark:text-emerald-400">{m.property}</span> : <span className="text-rose-600">no access — add the service account to this property</span>}
+                      </td>
+                      <td className="py-1.5 text-slate-500">{m.permission || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {googleTest.properties.length > 0 && (
+                <details className="text-slate-500">
+                  <summary className="cursor-pointer">All visible properties</summary>
+                  <ul className="mt-1 font-mono space-y-0.5">
+                    {googleTest.properties.map((p) => (
+                      <li key={p.site_url}>{p.site_url} <span className="text-slate-400">({p.permission})</span></li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Section 3: Resend Email Configuration */}
         <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200 dark:border-slate-700/80 p-6 shadow-sm space-y-4">
           <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-700/60">
@@ -441,11 +573,22 @@ export const SettingsPage: React.FC = () => {
             </div>
           </div>
 
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={() => uptimeNowMutation.mutate()}
+            disabled={uptimeNowMutation.isPending}
+            title="Probe every active site's homepage now (the job also runs hourly)"
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-750 transition-all disabled:opacity-60"
+          >
+            {uptimeNowMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Activity className="w-3.5 h-3.5" />}
+            Check uptime now
+          </button>
           <button
             type="button"
             onClick={() => runAllMutation.mutate()}
             disabled={runAllMutation.isPending}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-xl text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-all disabled:opacity-60 self-start sm:self-auto"
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-xl text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-all disabled:opacity-60"
           >
             {runAllMutation.isPending ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -454,6 +597,7 @@ export const SettingsPage: React.FC = () => {
             )}
             Run All Audits Now
           </button>
+          </div>
         </div>
 
         {jobsLoading ? (

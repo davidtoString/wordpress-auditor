@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     AI_PROVIDER: str = "openai"  # or "gemini"
     GOOGLE_PAGESPEED_API_KEY: str = ""
+    # Google Cloud service account key (the whole JSON file) with the Search Console API
+    # enabled; its client_email must be added as a user on each Search Console property.
+    GOOGLE_SERVICE_ACCOUNT_JSON: str = ""
+    # Seconds to wait before re-checking a newly seen urgent finding (0 disables).
+    URGENT_CONFIRM_DELAY_SECONDS: int = 120
+    UPTIME_PROBE_MINUTES: int = 60
     RESEND_API_KEY: str = ""
     RESEND_FROM_EMAIL: str = "audits@yourdomain.com"
     RESEND_FROM_NAME: str = "WP Auditor"

@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 # pages' HTML. Misses inactive plugins and any plugin that enqueues no front-end asset, but still
 # gives a useful signal without requiring WordPress credentials.
 PLUGIN_SLUG_PATTERN = re.compile(r"/wp-content/(?:plugins|mu-plugins)/([a-z0-9][a-z0-9\-]*)/", re.I)
+THEME_SLUG_PATTERN = re.compile(r"/wp-content/themes/([a-z0-9][a-z0-9_\-]*)/", re.I)
+
+# Site Health tests exposed over REST (administrator capability). Each answers
+# {status: good|recommended|critical, label, description}. These are what wp-admin shows under
+# Tools > Site Health, read here so nobody has to log in to 49 sites to look.
+SITE_HEALTH_TESTS = ["background-updates", "loopback-requests", "https-status",
+                     "dotorg-communication", "authorization-header", "page-cache"]
 
 # Above this many *active* plugins, flag it as worth auditing/trimming (page-load overhead,
 # attack surface, update/compatibility risk all scale with plugin count).
@@ -323,6 +330,107 @@ class WpHealthAuditor(BaseAuditor):
 
         score += api_score
 
+        # 5b. Theme in use. Authenticated: the themes endpoint lists every installed theme with
+        # its version. Otherwise the most-referenced /wp-content/themes/<slug>/ in the HTML is
+        # the active (child) theme and its style.css header carries Version and Template.
+        themes: list[dict[str, Any]] = []
+        theme_source = None
+        if wp_user and wp_pass:
+            try:
+                async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+                    t_resp = await self._request(client, "GET", f"{self.site_url}/wp-json/wp/v2/themes",
+                                                 auth=httpx.BasicAuth(wp_user, wp_pass))
+                if t_resp.status_code == 200:
+                    for t in t_resp.json():
+                        name = t.get("name")
+                        if isinstance(name, dict):
+                            name = name.get("rendered") or name.get("raw")
+                        themes.append({"slug": t.get("stylesheet"), "name": html_lib.unescape(str(name or t.get("stylesheet"))),
+                                       "version": t.get("version"), "status": t.get("status"),
+                                       "parent": t.get("template") if t.get("template") != t.get("stylesheet") else None})
+                    theme_source = "authenticated"
+            except Exception as exc:
+                logger.debug("themes endpoint failed: %s", exc)
+        if not themes:
+            counts: dict[str, int] = {}
+            for html_doc in [homepage_html] + [r.text for u, r in self.shared_pages.items() if u != self.site_url and r.status_code == 200]:
+                for slug in THEME_SLUG_PATTERN.findall(html_doc):
+                    counts[slug.lower()] = counts.get(slug.lower(), 0) + 1
+            if counts:
+                active_slug = max(counts, key=counts.get)
+                theme_source = "inferred_from_assets"
+
+                async def _theme_from_css(slug: str, status: str) -> dict[str, Any] | None:
+                    try:
+                        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False) as client:
+                            c_resp = await self._request(client, "GET", f"{self.site_url}/wp-content/themes/{slug}/style.css")
+                        if c_resp.status_code != 200:
+                            return {"slug": slug, "name": slug, "version": None, "status": status, "parent": None}
+                        hdr = wp_intel.parse_theme_header(c_resp.text)
+                        return {"slug": slug, "name": hdr.get("theme_name") or slug, "version": hdr.get("version"),
+                                "status": status, "parent": hdr.get("template")}
+                    except Exception:
+                        return {"slug": slug, "name": slug, "version": None, "status": status, "parent": None}
+
+                active = await _theme_from_css(active_slug, "active")
+                if active:
+                    themes.append(active)
+                    if active.get("parent") and active["parent"].lower() != active_slug:
+                        parent = await _theme_from_css(active["parent"].lower(), "parent")
+                        if parent:
+                            themes.append(parent)
+        findings["themes"] = themes
+        findings["theme_source"] = theme_source
+        active_theme = next((t for t in themes if t.get("status") == "active"), None)
+        if active_theme:
+            findings["active_theme"] = active_theme
+
+        # 5c. With credentials: who can administer the site, and what Site Health says. A new
+        # administrator account between two runs is the clearest sign of a compromise.
+        if wp_user and wp_pass:
+            auth = httpx.BasicAuth(wp_user, wp_pass)
+            try:
+                async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+                    u_resp = await self._request(client, "GET", f"{self.site_url}/wp-json/wp/v2/users",
+                                                 params={"context": "edit", "roles": "administrator", "per_page": 100}, auth=auth)
+                if u_resp.status_code == 200:
+                    admins = []
+                    for u in u_resp.json():
+                        admins.append({"username": u.get("username") or u.get("slug"), "name": u.get("name"),
+                                       "registered": (u.get("registered_date") or "")[:10] or None})
+                    admins.sort(key=lambda a: (a.get("username") or "").lower())
+                    findings["admin_users"] = admins
+                    findings["admin_users_total"] = int(u_resp.headers.get("X-WP-Total") or len(admins))
+                else:
+                    findings["admin_users_error"] = f"HTTP {u_resp.status_code}"
+            except Exception as exc:
+                findings["admin_users_error"] = str(exc)[:200]
+
+            site_health: dict[str, Any] = {}
+            sh_timeout = httpx.Timeout(45.0, connect=8.0)  # loopback and page-cache tests make their own requests
+
+            async def _sh(test: str) -> None:
+                try:
+                    async with httpx.AsyncClient(timeout=sh_timeout, verify=False) as client:
+                        r = await self._request(client, "GET", f"{self.site_url}/wp-json/wp-site-health/v1/tests/{test}", auth=auth)
+                    if r.status_code == 200:
+                        j = r.json()
+                        desc = re.sub(r"<[^>]+>", " ", str(j.get("description") or ""))
+                        desc = html_lib.unescape(re.sub(r"\s+", " ", desc)).strip()[:300]
+                        site_health[test] = {"status": j.get("status"), "label": html_lib.unescape(str(j.get("label") or "")),
+                                             "description": desc}
+                    else:
+                        site_health[test] = {"status": "unknown", "error": f"HTTP {r.status_code}"}
+                except Exception as exc:
+                    site_health[test] = {"status": "unknown", "error": str(exc)[:160]}
+
+            await asyncio.gather(*[_sh(t) for t in SITE_HEALTH_TESTS])
+            findings["site_health"] = site_health
+            sh_critical = [t for t, v in site_health.items() if v.get("status") == "critical"]
+            if sh_critical:
+                score -= min(15.0, 5.0 * len(sh_critical))
+                issues.append("Site Health critical: " + ", ".join(site_health[t].get("label") or t for t in sh_critical))
+
         # 6. Versions vs the outside world: known vulnerabilities (WPVulnerability) and
         # available updates (wordpress.org) for core and every installed plugin we know the
         # version of. These are the findings a site owner most needs without logging in.
@@ -366,6 +474,27 @@ class WpHealthAuditor(BaseAuditor):
                         logger.debug("plugin intel failed for %s: %s", p.get("slug"), exc)
 
                 await asyncio.gather(*[_check(p) for p in plugins_known])
+
+                vulnerable_themes: list[dict[str, Any]] = []
+                outdated_themes: list[dict[str, Any]] = []
+                for t in themes:
+                    if not t.get("slug"):
+                        continue
+                    try:
+                        tv = await wp_intel.theme_vulnerabilities(intel_client, t["slug"], t.get("version"))
+                        if tv["affecting"]:
+                            vulnerable_themes.append({**t, "vulnerabilities": tv["affecting"][:5]})
+                        latest = await wp_intel.theme_latest_version(intel_client, t["slug"])
+                        if latest and t.get("version") and wp_intel._cmp(t["version"], latest) < 0:
+                            outdated_themes.append({**t, "latest": latest})
+                    except Exception as exc:
+                        logger.debug("theme intel failed for %s: %s", t.get("slug"), exc)
+                findings["vulnerable_themes"] = vulnerable_themes
+                findings["outdated_themes"] = outdated_themes
+                if vulnerable_themes:
+                    score -= 25.0
+                    issues.insert(0, "Theme with known vulnerabilities: " + ", ".join(
+                        f"{t['name']} {t.get('version') or ''}".strip() for t in vulnerable_themes[:2]))
         except Exception as exc:
             logger.warning("WordPress intel lookups failed for %s: %s", self.site_url, exc)
             intel_errors += 1

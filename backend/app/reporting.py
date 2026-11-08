@@ -375,6 +375,12 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append("## Improve")
         lines.append("")
         lines += [_bl(i) for i in brief.get("improve") or []] or ["Nothing outstanding."]
+        if brief.get("muted"):
+            lines += ["", "## Acknowledged / accepted (tracked, not alerting)"]
+            lines += [f"- [{i.get('severity')}] {i.get('title')} ({i.get('mute_kind')})" for i in brief["muted"]]
+        if brief.get("unconfirmed"):
+            lines += ["", "## Seen once, not reproduced on re-check"]
+            lines += [f"- {u.get('title')}" for u in brief["unconfirmed"]]
         lines.append("")
         if report.get("narrative"):
             lines.append("## Summary")

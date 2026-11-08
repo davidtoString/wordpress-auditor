@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 import uuid
@@ -11,6 +11,7 @@ import uuid
 import httpx
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,7 @@ from app.auditors.site_crawler import discover_target_pages
 from app.auditors.advertools_auditor import AdvertoolsAuditor
 from app.auditors.availability import AvailabilityAuditor
 from app.auditors.contact_forms import ContactFormsAuditor
+from app.auditors.google_sc import SearchConsoleAuditor, service_account
 from app.auditors.cookies import CookiesAuditor
 from app.auditors.images import ImagesAuditor
 from app.auditors.links import LinksAuditor
@@ -34,6 +36,7 @@ from app.auditors.unlighthouse import UnlighthouseAuditor
 from app.auditors.visual import run_visual_check
 from app.auditors.wp_health import WpHealthAuditor
 from app.config import settings
+from app.confirm import confirm_urgent_findings
 from app.database import SessionLocal
 from app.email.resend_client import send_brief_email, send_weekly_digest_email
 from app.findings import (
@@ -47,6 +50,7 @@ from app.findings import (
     reconcile_findings,
 )
 from app.models import AlertConfig, AuditResult, AuditRun, Finding, Site
+from app.uptime import incidents_between, run_uptime_probe
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +137,7 @@ def mark_orphaned_runs_as_failed(db: Session) -> None:
 # display order. `needs_pages` marks modules that read the shared sitemap crawl / page pre-fetch.
 AUDIT_MODULES: dict[str, dict[str, Any]] = {
     "pagespeed": {"label": "PageSpeed Insights (homepage, Google)", "needs_pages": False},
+    "search_console": {"label": "Google Search Console (index, clicks, sitemaps)", "needs_pages": False},
     "unlighthouse": {"label": "Lighthouse Performance (site-wide)", "needs_pages": True},
     "visual": {"label": "Visual check (screenshots)", "needs_pages": True},
     "availability": {"label": "Availability, TLS & email DNS", "needs_pages": False},
@@ -271,6 +276,27 @@ def _trigger_weekly_digest() -> None:
         asyncio.run_coroutine_threadsafe(send_weekly_digest(), loop)
 
 
+def schedule_uptime_probe() -> None:
+    """Hourly homepage probe for every active site (see app/uptime.py). Starts a few minutes
+    after boot so a deploy does not probe before the network settles."""
+    try:
+        minutes = max(5, int(settings.UPTIME_PROBE_MINUTES or 60))
+        scheduler.add_job(
+            func=_trigger_uptime_probe, trigger=IntervalTrigger(minutes=minutes, jitter=120),
+            id="uptime_probe", replace_existing=True, name=f"Uptime probe (every {minutes} min)",
+            misfire_grace_time=600, coalesce=True,
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=3),
+        )
+    except Exception as exc:
+        logger.error("Failed scheduling uptime probe: %s", exc)
+
+
+def _trigger_uptime_probe() -> None:
+    loop = _MAIN_LOOP
+    if loop is not None and loop.is_running():
+        asyncio.run_coroutine_threadsafe(run_uptime_probe(), loop)
+
+
 async def send_weekly_digest() -> None:
     db = SessionLocal()
     try:
@@ -280,9 +306,10 @@ async def send_weekly_digest() -> None:
         sites = db.query(Site).filter(Site.is_active == True).order_by(Site.name).all()
         items = []
         for site in sites:
-            open_findings = (
-                db.query(Finding).filter(Finding.site_id == site.id, Finding.status == "open").all()
-            )
+            open_findings = [
+                f for f in db.query(Finding).filter(Finding.site_id == site.id, Finding.status == "open").all()
+                if not f.is_muted
+            ]
             open_findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.first_seen_at))
             latest = (
                 db.query(AuditRun)
@@ -326,6 +353,16 @@ def _page_facts(url: str, resp: httpx.Response | None) -> dict[str, Any]:
     except Exception:
         pass
     return facts
+
+
+def _contact_candidates(shared_pages: dict[str, httpx.Response], site_url: str) -> list[str]:
+    """Contact page URL(s) from the crawl, for Search Console URL inspection."""
+    out = []
+    for u, r in shared_pages.items():
+        path = urlparse(u).path.lower().strip("/")
+        if r.status_code == 200 and path in ("contact", "contact-us", "contactus", "get-in-touch"):
+            out.append(u)
+    return out[:1]
 
 
 def _merge_runtime_tracking(results: list[AuditModuleResult]) -> None:
@@ -459,6 +496,7 @@ async def execute_site_audit(
                 "unlighthouse": lambda: UnlighthouseAuditor(site.url, site, scope=scope, target_paths=target_paths),
                 "advertools": lambda: AdvertoolsAuditor(site.url, site, shared_pages, fetch_sem),
                 "pagespeed": lambda: PageSpeedAuditor(site.url, site),
+                "search_console": lambda: SearchConsoleAuditor(site.url, site, extra_urls=_contact_candidates(shared_pages, site.url)),
                 "availability": lambda: AvailabilityAuditor(site.url, site, request_semaphore=fetch_sem),
                 "seo": lambda: SeoAuditor(site.url, site, shared_pages, fetch_sem),
                 "security": lambda: SecurityAuditor(site.url, site, shared_pages, fetch_sem),
@@ -473,7 +511,10 @@ async def execute_site_audit(
                 "tracking_scripts": lambda: TrackingScriptsAuditor(site.url, site, shared_pages, fetch_sem),
             }
             assert set(factories) | _POST_MODULES == set(AUDIT_MODULES), "AUDIT_MODULES and auditor factories drifted apart"
-            auditors = [(m, factories[m]()) for m in active_modules if m not in _POST_MODULES and m != "availability"]
+            skip = {"availability"} | _POST_MODULES
+            if not service_account():
+                skip.add("search_console")  # no key in Settings: nothing to measure, no card
+            auditors = [(m, factories[m]()) for m in active_modules if m not in skip]
 
             async def safe_run(name: str, auditor) -> AuditModuleResult:
                 try:
@@ -526,11 +567,28 @@ async def execute_site_audit(
             if needs_pages:
                 measured.add("crawl")
             specs = extract_findings(site, results_dicts, page_statuses if needs_pages else None)
+            # Confirm urgent findings seen for the first time before they can trigger an email.
+            open_fps = {fp for (fp,) in db.query(Finding.fingerprint).filter(Finding.site_id == site.id, Finding.status == "open")}
+            unconfirmed: list[dict[str, Any]] = []
+            try:
+                specs, unconfirmed = await confirm_urgent_findings(
+                    site.url, specs, open_fps, float(settings.URGENT_CONFIRM_DELAY_SECONDS or 0))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Urgent-finding confirmation failed on %s (keeping all): %s", site.url, exc)
             reconciled = reconcile_findings(db, site, audit_run, specs, measured)
+            reconciled["unconfirmed"] = unconfirmed
             page_inventory = {u: _page_facts(u, shared_pages.get(u)) for u in page_statuses} if needs_pages else {}
             inventory = build_inventory(site, results_dicts, page_inventory, crawl_stats)
             prev_inventory = (previous_run.brief or {}).get("inventory") if previous_run else None
             changes = diff_inventory(prev_inventory, inventory, site.url) if not is_partial else []
+            if not is_partial:
+                try:
+                    since = previous_run.completed_at if previous_run else None
+                    reconciled["downtime"] = incidents_between(db, site.id, since, datetime.now(timezone.utc).replace(tzinfo=None))
+                except Exception as exc:
+                    logger.debug("downtime lookup failed: %s", exc)
             brief = build_brief(site, audit_run, results_dicts, reconciled, changes, inventory, previous_run)
             brief["partial"] = is_partial
 

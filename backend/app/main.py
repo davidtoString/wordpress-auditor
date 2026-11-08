@@ -30,6 +30,7 @@ from app.scheduler import (
     init_scheduler_with_sites,
     mark_orphaned_runs_as_failed,
     register_main_loop,
+    schedule_uptime_probe,
     schedule_weekly_digest,
     scheduler,
 )
@@ -159,6 +160,10 @@ async def lifespan(app: FastAPI):
         conn.execute(sa.text("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS modules JSON"))
         conn.execute(sa.text("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS brief JSON"))
         conn.execute(sa.text("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS ai_summary TEXT"))
+        conn.execute(sa.text("ALTER TABLE sites ADD COLUMN IF NOT EXISTS search_console_property VARCHAR(255)"))
+        for col, typ in (("mute_kind", "VARCHAR(20)"), ("mute_until", "TIMESTAMP"), ("mute_note", "TEXT"),
+                         ("muted_at", "TIMESTAMP"), ("muted_by", "VARCHAR(255)")):
+            conn.execute(sa.text(f"ALTER TABLE findings ADD COLUMN IF NOT EXISTS {col} {typ}"))
         # Rows written before modules used none_as_null=True hold the JSON literal 'null'
         # instead of SQL NULL, which hid those full runs from every `modules IS NULL` filter.
         conn.execute(sa.text("UPDATE audit_runs SET modules = NULL WHERE modules::text = 'null'"))
@@ -175,6 +180,7 @@ async def lifespan(app: FastAPI):
         if not scheduler.running:
             scheduler.start()
         schedule_weekly_digest()
+        schedule_uptime_probe()
         db = SessionLocal()
         try:
             load_persisted_settings(db)

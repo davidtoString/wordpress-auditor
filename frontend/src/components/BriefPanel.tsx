@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom'
 import {
   AlertOctagon,
   ArrowLeftRight,
+  BellOff,
+  EyeOff,
   CheckCircle2,
   ChevronDown,
   ExternalLink,
@@ -135,7 +137,10 @@ export const BriefPanel: React.FC<BriefPanelProps> = ({ brief, narrative, siteId
   const changes = brief.changes || []
   const improve = brief.improve || []
   const resolved = brief.resolved || []
+  const muted = brief.muted || []
+  const unconfirmed = brief.unconfirmed || []
   const notes = brief.notes || []
+  const [showMuted, setShowMuted] = useState(false)
   const improveShown = showAllImprove ? improve : improve.slice(0, compact ? 6 : 12)
 
   const Section: React.FC<{
@@ -246,6 +251,42 @@ export const BriefPanel: React.FC<BriefPanelProps> = ({ brief, narrative, siteId
           </>
         )}
       </Section>
+
+      {muted.length > 0 && (
+        <div className="text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3">
+          <button type="button" onClick={() => setShowMuted((v) => !v)} className="flex items-center gap-2 font-semibold hover:text-slate-700 dark:hover:text-slate-200">
+            <BellOff className="w-4 h-4" />
+            {muted.length} acknowledged, snoozed or accepted (tracked, not alerting)
+            <ChevronDown className={cn('w-3 h-3 transition-transform', showMuted && 'rotate-180')} />
+          </button>
+          {showMuted && (
+            <ul className="mt-2 space-y-1">
+              {muted.map((i) => (
+                <li key={i.fingerprint} className="flex items-center gap-2">
+                  <SeverityPill severity={i.severity} />
+                  <span className="text-slate-600 dark:text-slate-300">{i.title}</span>
+                  <span className="text-[10px] uppercase tracking-wide text-slate-400">{i.mute_kind}{i.mute_until ? ` until ${formatDate(i.mute_until).slice(0, 12)}` : ''}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {unconfirmed.length > 0 && (
+        <div className="flex items-start gap-2 text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3">
+          <EyeOff className="w-4 h-4 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-semibold">Seen once, not reproduced on re-check (not reported):</span>{' '}
+            {unconfirmed.map((u, i) => (
+              <span key={i}>
+                {u.title}
+                {i < unconfirmed.length - 1 ? ' · ' : ''}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {notes.length > 0 && (
         <div className="flex items-start gap-2 text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3">

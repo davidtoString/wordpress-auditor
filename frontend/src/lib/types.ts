@@ -29,6 +29,8 @@ export interface Site {
   nap_name?: string | null
   nap_address?: string | null
   nap_phone?: string | null
+  /** Search Console property override ("sc-domain:example.com" or "https://www.example.com/"); null = auto-match. */
+  search_console_property?: string | null
   is_active: boolean
   last_audit_at?: string | null
   last_score?: number | null
@@ -40,7 +42,37 @@ export interface Site {
   open_improve?: number
   new_last_run?: number
   changes_last_run?: number
-  state?: 'broken' | 'attention' | 'ok' | null
+  state?: 'down' | 'broken' | 'attention' | 'ok' | null
+  /** Hourly uptime probe. */
+  down_now?: boolean
+  down_since?: string | null
+  uptime_30d?: number | null
+  last_check_at?: string | null
+}
+
+export interface UptimeIncident {
+  id?: string
+  started_at: string
+  ended_at?: string | null
+  duration_minutes: number
+  first_error?: string | null
+  status_code?: number | null
+  checks_failed?: number
+}
+
+export interface UptimeSummary {
+  days: number
+  checks: number
+  uptime_pct: number | null
+  down_now: boolean
+  down_since?: string | null
+  last_check_at?: string | null
+  last_status?: number | null
+  last_latency_ms?: number | null
+  last_note?: string | null
+  latency_p50_ms?: number | null
+  incidents: UptimeIncident[]
+  recent: { at: string; ok: boolean; status?: number | null; latency_ms?: number | null; note?: string | null }[]
 }
 
 export interface SiteCreateInput {
@@ -53,6 +85,7 @@ export interface SiteCreateInput {
   nap_name?: string | null
   nap_address?: string | null
   nap_phone?: string | null
+  search_console_property?: string | null
   is_active?: boolean
 }
 
@@ -109,7 +142,13 @@ export interface BriefItem {
   is_new?: boolean
   first_seen_at?: string
   times_seen?: number
+  muted?: boolean
+  mute_kind?: MuteKind | null
+  mute_until?: string | null
+  mute_note?: string | null
 }
+
+export type MuteKind = 'acknowledged' | 'snoozed' | 'accepted'
 
 export interface BriefChange {
   kind: string
@@ -127,6 +166,9 @@ export interface BriefStats {
   changes_notable: number
   resolved: number
   modules_not_measured: number
+  muted?: number
+  unconfirmed?: number
+  downtime?: number
 }
 
 export interface AuditBrief {
@@ -139,7 +181,12 @@ export interface AuditBrief {
   urgent: BriefItem[]
   changes: BriefChange[]
   improve: BriefItem[]
-  resolved: { type: string; severity: Severity; title: string; url?: string | null; module: string; first_seen_at: string }[]
+  resolved: { type: string; severity: Severity; title: string; url?: string | null; module: string; first_seen_at: string; was_muted?: boolean }[]
+  /** Open findings a person acknowledged, snoozed or accepted: tracked, not alerting. */
+  muted?: BriefItem[]
+  /** Urgent findings seen once this run and not reproduced on re-check (dropped). */
+  unconfirmed?: { type: string; title: string; url?: string | null; severity: Severity }[]
+  downtime?: { started_at: string; ended_at?: string | null; duration_minutes: number; first_error?: string | null; ongoing: boolean }[]
   notes: string[]
   stats: BriefStats
 }
@@ -160,6 +207,20 @@ export interface Finding {
   times_seen: number
   first_seen_run_id?: string | null
   last_seen_run_id?: string | null
+  mute_kind?: MuteKind | null
+  mute_until?: string | null
+  mute_note?: string | null
+  muted_at?: string | null
+  muted_by?: string | null
+  is_muted?: boolean
+}
+
+export interface GoogleTestResult {
+  service_account_email: string
+  properties: { site_url: string; permission: string }[]
+  sites: { site_id: string; site: string; url: string; property: string | null; permission: string | null; override?: string | null }[]
+  matched: number
+  unmatched: string[]
 }
 
 export interface Settings {
@@ -172,6 +233,8 @@ export interface Settings {
   GEMINI_API_KEY?: string
   AI_PROVIDER?: 'openai' | 'gemini'
   GOOGLE_PAGESPEED_API_KEY?: string
+  /** Full service-account JSON key; GET never returns it, only the *_configured flags and e-mail. */
+  GOOGLE_SERVICE_ACCOUNT_JSON?: string
   RESEND_API_KEY?: string
   RESEND_FROM_EMAIL?: string
   RESEND_FROM_NAME?: string
@@ -182,6 +245,11 @@ export interface Settings {
   gemini_configured?: boolean
   resend_configured?: boolean
   pagespeed_configured?: boolean
+  google_sc_configured?: boolean
+  google_sc_invalid?: boolean
+  google_service_account_email?: string | null
+  URGENT_CONFIRM_DELAY_SECONDS?: number
+  UPTIME_PROBE_MINUTES?: number
 }
 
 export interface SchedulerJob {

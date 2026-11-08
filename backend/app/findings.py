@@ -27,6 +27,16 @@ from app.models import AuditRun, Finding, Site
 logger = logging.getLogger(__name__)
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+# Dynamic number insertion / call tracking endpoints. When these fail the static number shows,
+# calls still arrive, and the campaign report says the campaign produced nothing.
+CALL_TRACKING_HOSTS = {
+    "servicetitan.com": "ServiceTitan DNI", "callrail.com": "CallRail", "calltrk.com": "CallRail",
+    "iconnode.com": "WhatConverts", "whatconverts.com": "WhatConverts", "tctm.co": "CallTrackingMetrics",
+    "calltrackingmetrics.com": "CallTrackingMetrics", "invocacdn.com": "Invoca", "invoca.net": "Invoca",
+    "marchex.io": "Marchex", "dialogtech.com": "DialogTech", "ringba.com": "Ringba", "800response.com": "800response",
+    "scorpion.co": "Scorpion", "callsource.com": "CallSource", "nimbata.com": "Nimbata",
+}
 URGENT_SEVERITIES = {"critical", "high"}
 
 
@@ -129,6 +139,12 @@ def extract_findings(
         if mail and mail.get("spf_all") == "+all":
             add(type="spf_permissive", severity="high", section="urgent", module="availability",
                 title="SPF record ends in +all, which lets anyone send as this domain", detail=mail)
+        reg = av.get("registration") or {}
+        if reg.get("ok") and reg.get("days_left") is not None and reg["days_left"] <= 30:
+            add(type="domain_expiring", severity="critical" if reg["days_left"] <= 7 else "high", section="urgent",
+                module="availability",
+                title=f"Domain registration expires in {reg['days_left']} day(s)" + (f" ({reg.get('registrar')})" if reg.get("registrar") else ""),
+                detail=reg)
 
     # --- technical SEO ----------------------------------------------------------------------
     adv = d("advertools")
@@ -203,6 +219,24 @@ def extract_findings(
                 title=f"{'Active' if active else 'Inactive'} plugin {p['name']} {p.get('version')} has a known vulnerability"
                       + (f": {v0.get('name')}" if v0.get("name") else ""),
                 detail={"plugin": p, "fix": f"Update to {v0.get('fixed_in')}" if v0.get("fixed_in") else "No fixed version published; remove the plugin"})
+        for t in wp.get("vulnerable_themes") or []:
+            active = t.get("status") in ("active", "parent")
+            v0 = (t.get("vulnerabilities") or [{}])[0]
+            add(type="theme_vulnerable", severity="critical" if active else "high", section="urgent",
+                module="wp_health", key=t.get("slug") or t.get("name"),
+                title=f"{'Active' if active else 'Inactive'} theme {t.get('name')} {t.get('version') or ''} has a known vulnerability".replace("  ", " ")
+                      + (f": {v0.get('name')}" if v0.get("name") else ""),
+                detail={"theme": t, "fix": f"Update to {v0.get('fixed_in')}" if v0.get("fixed_in") else "No fixed version published"})
+        for t in wp.get("outdated_themes") or []:
+            add(type="theme_outdated", severity="low", section="improve", module="wp_health", key=t.get("slug"),
+                title=f"Theme update available: {t.get('name')} {t.get('version')} → {t.get('latest')}", detail=t)
+        for test, res in (wp.get("site_health") or {}).items():
+            if res.get("status") == "critical":
+                add(type="site_health_critical", severity="medium", section="improve", module="wp_health", key=test,
+                    title=f"Site Health critical: {res.get('label') or test}", detail=res)
+            elif res.get("status") == "recommended" and test in ("page-cache", "https-status", "background-updates"):
+                add(type="site_health_recommended", severity="low", section="improve", module="wp_health", key=test,
+                    title=f"Site Health: {res.get('label') or test}", detail=res)
         if wp.get("core_vulnerabilities"):
             add(type="core_vulnerable", severity="critical", section="urgent", module="wp_health",
                 title=f"WordPress {wp.get('version_detected')} has known vulnerabilities; update core",
@@ -284,6 +318,8 @@ def extract_findings(
 
     # --- performance ----------------------------------------------------------------------
     lh = d("unlighthouse")
+    dni_failures: dict[str, dict[str, Any]] = {}
+    console_by_msg: dict[str, dict[str, Any]] = {}
     for r in lh.get("routes") or []:
         perf = r.get("performance")
         if perf is not None and perf < 50:
@@ -295,13 +331,30 @@ def extract_findings(
         for fr in (r.get("failed_requests") or [])[:5]:
             host = urlparse(fr.get("url", "")).netloc.lower()
             first_party = host.endswith(urlparse(site_url).netloc.lower().removeprefix("www."))
+            vendor = next((v for h, v in CALL_TRACKING_HOSTS.items() if host == h or host.endswith("." + h)), None)
+            if vendor:
+                agg = dni_failures.setdefault(vendor, {"status": fr.get("status"), "request": fr.get("url"), "pages": []})
+                agg["pages"].append(r.get("path", "/"))
+                continue
             add(type="broken_asset", severity="medium" if first_party else "low", section="urgent" if first_party else "improve",
                 module="unlighthouse", url=fr.get("url"), key=str(fr.get("status")),
                 title=f"{'Asset' if first_party else 'Third-party request'} returns HTTP {fr.get('status')} on {r.get('path')}: {fr.get('url', '')[:90]}",
                 detail={"page": r.get("url"), "type": fr.get("type")})
-        for ce in (r.get("console_errors") or [])[:3]:
-            add(type="console_error", severity="low", section="improve", module="unlighthouse", url=r.get("url"),
-                key=ce[:60], title=f"Console error on {r.get('path')}: {ce[:100]}")
+        for ce in (r.get("console_errors") or [])[:5]:
+            agg = console_by_msg.setdefault(ce[:60], {"message": ce[:200], "pages": []})
+            agg["pages"].append(r.get("path", "/"))
+    # One finding per failing call-tracking vendor and per distinct console message, across
+    # pages, instead of one per page (a site-wide script failing on 20 pages is one problem).
+    for vendor, agg in dni_failures.items():
+        add(type="call_tracking_failing", severity="high", section="urgent", module="unlighthouse",
+            url=agg["request"], key=vendor,
+            title=f"{vendor} call tracking request fails (HTTP {agg['status']}) on {len(agg['pages'])} page(s): "
+                  f"tracked numbers may not swap and calls go unattributed",
+            detail={"vendor": vendor, "status": agg["status"], "pages": agg["pages"][:30]})
+    for key, agg in console_by_msg.items():
+        n = len(agg["pages"])
+        add(type="console_error", severity="low", section="improve", module="unlighthouse", key=key,
+            title=f"Console error on {n} page(s): {agg['message'][:100]}", detail={"pages": agg["pages"][:30]})
     a11y_pages: dict[str, list[str]] = {}
     a11y_label: dict[str, str] = {}
     for r in lh.get("routes") or []:
@@ -388,6 +441,47 @@ def extract_findings(
                 detail={"issues": verdict.get("issues"), "screenshot_url": p.get("screenshot_url"),
                         "confidence": verdict.get("confidence")})
 
+    sc = d("search_console")
+    if sc and sc.get("configured"):
+        if sc.get("summary_reason") == "no_property":
+            add(type="sc_not_connected", severity="info", section="improve", module="search_console",
+                title=f"Search Console: grant {sc.get('service_account_email')} access to this site's property",
+                detail={"available_properties": (sc.get("available_properties") or [])[:20]})
+        if sc.get("connected"):
+            delta = sc.get("clicks_delta_pct")
+            prev = (sc.get("prev_totals") or {}).get("clicks") or 0
+            if delta is not None and prev >= 30 and delta <= -35:
+                add(type="sc_traffic_drop", severity="high", section="urgent", module="search_console",
+                    title=f"Google search clicks down {abs(delta):.0f}% over the last 28 days "
+                          f"({(sc.get('totals') or {}).get('clicks')} vs {prev})",
+                    detail={"totals": sc.get("totals"), "prev_totals": sc.get("prev_totals"), "window": sc.get("window")})
+            key_urls = set(sc.get("key_urls") or [])
+            for u, ins in (sc.get("inspections") or {}).items():
+                if ins.get("error"):
+                    continue
+                if ins.get("robots_state") == "DISALLOWED":
+                    add(type="sc_robots_blocked", severity="critical", section="urgent", module="search_console", url=u,
+                        title=f"Google reports robots.txt blocks {_path(u, site_url)}", detail=ins)
+                elif ins.get("indexing_state") in ("BLOCKED_BY_META_TAG", "BLOCKED_BY_HTTP_HEADER"):
+                    add(type="sc_noindex", severity="high" if u in key_urls else "medium",
+                        section="urgent" if u in key_urls else "improve", module="search_console", url=u,
+                        title=f"Google sees noindex on {_path(u, site_url)} ({ins['indexing_state']})", detail=ins)
+                elif ins.get("verdict") == "FAIL" or (ins.get("coverage_state") and "not indexed" in ins["coverage_state"].lower()):
+                    add(type="sc_not_indexed", severity="high" if u in key_urls else "medium",
+                        section="urgent" if u in key_urls else "improve", module="search_console", url=u,
+                        title=f"Not indexed by Google: {_path(u, site_url)} ({ins.get('coverage_state')})", detail=ins)
+                gc, uc = ins.get("google_canonical"), ins.get("user_canonical")
+                if gc and uc and gc.rstrip("/") != uc.rstrip("/"):
+                    add(type="sc_canonical_mismatch", severity="medium", section="improve", module="search_console", url=u,
+                        title=f"Google chose a different canonical for {_path(u, site_url)}: {gc[:80]}", detail=ins)
+            for sm in sc.get("sitemaps") or []:
+                if sm.get("errors"):
+                    add(type="sc_sitemap_errors", severity="medium", section="improve", module="search_console", key=sm.get("path"),
+                        title=f"Sitemap has {sm['errors']} error(s) in Search Console: {sm.get('path')}", detail=sm)
+            if sc.get("sitemaps") == []:
+                add(type="sc_no_sitemap", severity="low", section="improve", module="search_console",
+                    title="No sitemap submitted in Search Console")
+
     # de-duplicate by fingerprint (keep the most severe)
     best: dict[str, FindingSpec] = {}
     for f in out:
@@ -398,6 +492,17 @@ def extract_findings(
 
 
 # ============================================================================ inventory
+
+def _indexed(ins: dict[str, Any]) -> bool | None:
+    if ins.get("verdict") == "PASS":
+        return True
+    if ins.get("verdict") == "FAIL":
+        return False
+    cov = (ins.get("coverage_state") or "").lower()
+    if cov:
+        return "indexed" in cov and "not indexed" not in cov
+    return None
+
 
 def build_inventory(
     site: Site,
@@ -438,6 +543,14 @@ def build_inventory(
         },
         "tls_expires": (av.get("tls") or {}).get("not_after"),
         "dns": av.get("dns_addresses"),
+        "domain_expires": (av.get("registration") or {}).get("expires"),
+        "theme": {t.get("slug"): {"name": t.get("name"), "version": t.get("version"), "status": t.get("status")}
+                  for t in (wp.get("themes") or []) if t.get("slug")},
+        "admin_users": sorted(a.get("username") for a in (wp.get("admin_users") or []) if a.get("username")) if wp.get("admin_users") is not None else None,
+        "sc": {
+            "clicks_28d": ((by_module.get("search_console") or {}).get("totals") or {}).get("clicks"),
+            "indexed": {u: _indexed(i) for u, i in ((by_module.get("search_console") or {}).get("inspections") or {}).items() if not i.get("error")},
+        } if (by_module.get("search_console") or {}).get("connected") else None,
         "modules_measured": sorted(r["module"] for r in results if r.get("score") is not None or not (r.get("details") or {}).get("not_measured")),
     }
     return inv
@@ -496,6 +609,37 @@ def diff_inventory(prev: dict[str, Any] | None, cur: dict[str, Any], site_url: s
                 ch("plugin_updated", "info", f"{b.get('name')} updated {a['version']} → {b['version']}", slug=slug)
             if a.get("status") != b.get("status") and a.get("status") and b.get("status"):
                 ch("plugin_status", "low", f"{b.get('name')} is now {b['status']} (was {a['status']})", slug=slug)
+
+    # Administrators (authenticated runs only). A new admin nobody created is the clearest
+    # sign of a compromise; it is a change here and the brief email goes out on it.
+    pa, ca = prev.get("admin_users"), cur.get("admin_users")
+    if pa is not None and ca is not None:
+        for u in sorted(set(ca) - set(pa)):
+            ch("admin_added", "critical", f"New administrator account: {u}. If nobody on the team created it, treat the site as compromised.", username=u)
+        for u in sorted(set(pa) - set(ca)):
+            ch("admin_removed", "low", f"Administrator account removed: {u}", username=u)
+
+    # Theme
+    pth, cth = prev.get("theme") or {}, cur.get("theme") or {}
+    if pth and cth:
+        pact = next((k for k, v in pth.items() if v.get("status") == "active"), None)
+        cact = next((k for k, v in cth.items() if v.get("status") == "active"), None)
+        if pact and cact and pact != cact:
+            ch("theme_switched", "high", f"Active theme changed: {pth[pact].get('name')} → {cth[cact].get('name')}", before=pact, after=cact)
+        for slug in sorted(set(pth) & set(cth)):
+            a, b = pth[slug], cth[slug]
+            if a.get("version") and b.get("version") and a["version"] != b["version"]:
+                ch("theme_updated", "info", f"Theme {b.get('name')} updated {a['version']} → {b['version']}", slug=slug)
+
+    # Search Console
+    psc, csc = prev.get("sc") or {}, cur.get("sc") or {}
+    if psc and csc:
+        for u in sorted(set(psc.get("indexed") or {}) & set(csc.get("indexed") or {})):
+            a, b = psc["indexed"][u], csc["indexed"][u]
+            if a is True and b is False:
+                ch("deindexed", "high", f"Google dropped {_path(u, site_url)} from the index", url=u)
+            elif a is False and b is True:
+                ch("indexed", "info", f"Google indexed {_path(u, site_url)}", url=u)
 
     # Tracking and third parties
     pt, ct = set(prev.get("tracking_ids") or []), set(cur.get("tracking_ids") or [])
@@ -561,6 +705,8 @@ def diff_inventory(prev: dict[str, Any] | None, cur: dict[str, Any], site_url: s
         ch("dns_changed", "medium", f"DNS now points to {', '.join(cur['dns'])} (was {', '.join(prev['dns'])})")
     if prev.get("tls_expires") and cur.get("tls_expires") and prev["tls_expires"] != cur["tls_expires"]:
         ch("tls_renewed", "info", f"TLS certificate renewed, now valid until {cur['tls_expires'][:10]}")
+    if prev.get("domain_expires") and cur.get("domain_expires") and prev["domain_expires"] != cur["domain_expires"]:
+        ch("domain_renewed", "info", f"Domain registration renewed, now until {cur['domain_expires'][:10]}")
 
     changes.sort(key=lambda c: SEVERITY_ORDER.get(c["severity"], 9))
     return changes
@@ -598,6 +744,10 @@ def reconcile_findings(
                 row.first_seen_run_id = run.id
                 row.first_seen_at = now
                 row.times_seen = 0
+                # A problem that was fixed and came back deserves a fresh look.
+                row.mute_kind = None
+                row.mute_until = None
+                row.mute_note = None
             else:
                 row = Finding(site_id=site.id, fingerprint=fp, type=spec.type, module=spec.module,
                               first_seen_run_id=run.id, first_seen_at=now, times_seen=0)
@@ -613,8 +763,14 @@ def reconcile_findings(
         row.last_seen_run_id = run.id
         row.last_seen_at = now
         row.times_seen = (row.times_seen or 0) + 1
+        muted = bool(row.mute_kind) and (row.mute_until is None or row.mute_until > now)
+        if row.mute_kind == "snoozed" and row.mute_until is not None and row.mute_until <= now:
+            row.mute_kind = None  # snooze expired: back on the list
+            row.mute_until = None
         item = {**spec.as_dict(), "is_new": is_new, "first_seen_at": row.first_seen_at.isoformat(),
-                "times_seen": row.times_seen}
+                "times_seen": row.times_seen, "muted": muted, "mute_kind": row.mute_kind if muted else None,
+                "mute_until": row.mute_until.isoformat() if (muted and row.mute_until) else None,
+                "mute_note": row.mute_note if muted else None}
         (new_items if is_new else persisting).append(item)
 
     resolved: list[dict[str, Any]] = []
@@ -627,7 +783,8 @@ def reconcile_findings(
         row.resolved_at = now
         row.resolved_run_id = run.id
         resolved.append({"type": row.type, "severity": row.severity, "title": row.title, "url": row.url,
-                         "module": row.module, "first_seen_at": row.first_seen_at.isoformat()})
+                         "module": row.module, "first_seen_at": row.first_seen_at.isoformat(),
+                         "was_muted": bool(row.mute_kind)})
 
     db.flush()
     return {"new": new_items, "persisting": persisting, "resolved": resolved}
@@ -646,8 +803,22 @@ def build_brief(
 ) -> dict[str, Any]:
     all_items = reconciled["new"] + reconciled["persisting"]
     all_items.sort(key=lambda i: (SEVERITY_ORDER.get(i["severity"], 9), not i["is_new"], i["title"]))
-    urgent = [i for i in all_items if i["section"] == "urgent"]
-    improve = [i for i in all_items if i["section"] == "improve"]
+    muted = [i for i in all_items if i.get("muted")]
+    urgent = [i for i in all_items if i["section"] == "urgent" and not i.get("muted")]
+    improve = [i for i in all_items if i["section"] == "improve" and not i.get("muted")]
+    unconfirmed = reconciled.get("unconfirmed") or []
+    downtime = reconciled.get("downtime") or []
+    changes = list(changes)
+    for inc in downtime:
+        mins = inc.get("duration_minutes") or 0
+        dur = f"{mins} min" if mins < 60 else f"{mins // 60}h {mins % 60:02d}m"
+        if inc.get("ongoing"):
+            changes.insert(0, {"kind": "downtime", "severity": "critical",
+                               "title": f"Site is DOWN since {inc['started_at'][:16].replace('T', ' ')} UTC ({inc.get('first_error')})", "detail": inc})
+        else:
+            changes.insert(0, {"kind": "downtime", "severity": "high",
+                               "title": f"Site was down for about {dur} from {inc['started_at'][:16].replace('T', ' ')} UTC ({inc.get('first_error')})",
+                               "detail": inc})
 
     notes: list[str] = []
     for r in results:
@@ -666,6 +837,9 @@ def build_brief(
         "changes": changes,
         "improve": improve,
         "resolved": reconciled["resolved"],
+        "muted": muted,
+        "unconfirmed": unconfirmed,
+        "downtime": downtime,
         "notes": notes,
         "stats": {
             "urgent": len(urgent),
@@ -675,6 +849,9 @@ def build_brief(
             "changes": len(changes),
             "changes_notable": sum(1 for c in changes if c["severity"] in ("critical", "high", "medium")),
             "resolved": len(reconciled["resolved"]),
+            "muted": len(muted),
+            "unconfirmed": len(unconfirmed),
+            "downtime": len(downtime),
             "modules_not_measured": len(notes),
         },
         "inventory": inventory,
@@ -688,7 +865,7 @@ def brief_needs_alert(brief: dict[str, Any]) -> bool:
     if brief.get("first_run"):
         return s.get("urgent", 0) > 0
     return bool(s.get("urgent_new") or s.get("changes_notable")
-                or any(r.get("severity") in URGENT_SEVERITIES for r in brief.get("resolved") or []))
+                or any(r.get("severity") in URGENT_SEVERITIES and not r.get("was_muted") for r in brief.get("resolved") or []))
 
 
 def brief_to_markdown(site_name: str, site_url: str, brief: dict[str, Any]) -> str:
@@ -710,6 +887,14 @@ def brief_to_markdown(site_name: str, site_url: str, brief: dict[str, Any]) -> s
     out.append("")
     out.append("## Improve")
     out += [line(i) for i in (brief.get("improve") or [])[:40]] or ["- Nothing outstanding."]
+    if brief.get("muted"):
+        out.append("")
+        out.append("## Acknowledged / accepted (not alerting)")
+        out += [f"- [{i['severity']}] {i['title']} ({i.get('mute_kind')})" for i in brief["muted"][:20]]
+    if brief.get("unconfirmed"):
+        out.append("")
+        out.append("## Seen once, not reproduced (dropped)")
+        out += [f"- {u['title']}" for u in brief["unconfirmed"]]
     if brief.get("notes"):
         out.append("")
         out.append("## Not measured this run")

@@ -69,6 +69,7 @@ export const SiteForm: React.FC<SiteFormProps> = ({
   const [napName, setNapName] = useState(initialValues?.nap_name || '')
   const [napAddress, setNapAddress] = useState(initialValues?.nap_address || '')
   const [napPhone, setNapPhone] = useState(initialValues?.nap_phone || '')
+  const [scProperty, setScProperty] = useState(initialValues?.search_console_property || '')
 
   const cronPresets = [
     { label: 'Daily 6 AM', value: '0 6 * * *' },
@@ -96,6 +97,7 @@ export const SiteForm: React.FC<SiteFormProps> = ({
       nap_name: napName.trim() || null,
       nap_address: napAddress.trim() || null,
       nap_phone: napPhone.trim() || null,
+      search_console_property: scProperty.trim() || null,
     }
 
     await onSubmit(payload)
@@ -463,6 +465,25 @@ export const SiteForm: React.FC<SiteFormProps> = ({
               </div>
             </div>
           )}
+        </div>
+
+        {/* Search Console property override */}
+        <div className="bg-white dark:bg-slate-800/90 rounded-2xl border border-slate-200 dark:border-slate-700/80 p-6 shadow-sm">
+          <label htmlFor="scProperty" className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+            Search Console property <span className="normal-case font-normal text-slate-400">(optional)</span>
+          </label>
+          <input
+            id="scProperty"
+            type="text"
+            value={scProperty}
+            onChange={(e) => setScProperty(e.target.value)}
+            placeholder="sc-domain:example.com or https://www.example.com/"
+            className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
+          />
+          <p className="mt-1.5 text-xs text-slate-500">
+            Leave blank to match automatically (domain property first, then the URL-prefix property for this origin). Set it when the
+            site lives under a property with a different host. The Google service account is configured once in Settings.
+          </p>
         </div>
 
         {/* Action Buttons */}

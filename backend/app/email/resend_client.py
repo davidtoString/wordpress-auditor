@@ -365,3 +365,52 @@ async def send_weekly_digest_email(to_email: str, items: list[dict[str, Any]]) -
     """
     html = _render_layout("Weekly site digest", content)
     return await _send_mail(to_email, f"Weekly site digest: {len(items)} sites", html)
+
+
+def _fmt_dt(dt: Any) -> str:
+    try:
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return str(dt)
+
+
+def _fmt_duration(delta: Any) -> str:
+    try:
+        mins = int(delta.total_seconds() // 60)
+    except Exception:
+        return str(delta)
+    if mins < 60:
+        return f"{mins} min"
+    h, m = divmod(mins, 60)
+    return f"{h}h {m:02d}m" if h < 48 else f"{h // 24}d {h % 24}h"
+
+
+async def send_downtime_email(to_email: str, site_name: str, site_url: str, error: str, started_at: Any) -> dict[str, Any] | None:
+    """Sent by the hourly probe the first time a site fails two consecutive attempts."""
+    content = f"""
+      <h2 style="margin:0 0 4px;color:#b91c1c;">{_esc(site_name)} is down</h2>
+      <p style="margin:0 0 14px;color:#64748b;font-size:13px;"><a href="{_esc(site_url)}" style="color:#2563eb;">{_esc(site_url)}</a></p>
+      <table>
+        <tr><th style="text-align:left;">Detected</th><td>{_esc(_fmt_dt(started_at))}</td></tr>
+        <tr><th style="text-align:left;">Error</th><td>{_esc(error)}</td></tr>
+        <tr><th style="text-align:left;">Checks</th><td>Failed on 2 consecutive attempts one minute apart; the probe runs hourly and will email again when the site answers.</td></tr>
+      </table>
+      <div style="text-align:center;margin-top:24px;"><a href="{_esc(settings.FRONTEND_URL)}" class="btn">Open dashboard</a></div>
+    """
+    return await _send_mail(to_email, f"🔴 DOWN: {site_name} ({error[:60]})", _render_layout(f"{site_name} is down", content))
+
+
+async def send_recovery_email(to_email: str, site_name: str, site_url: str, started_at: Any, ended_at: Any,
+                              duration: Any, first_error: str) -> dict[str, Any] | None:
+    content = f"""
+      <h2 style="margin:0 0 4px;color:#047857;">{_esc(site_name)} is back up</h2>
+      <p style="margin:0 0 14px;color:#64748b;font-size:13px;"><a href="{_esc(site_url)}" style="color:#2563eb;">{_esc(site_url)}</a></p>
+      <table>
+        <tr><th style="text-align:left;">Down from</th><td>{_esc(_fmt_dt(started_at))}</td></tr>
+        <tr><th style="text-align:left;">Back at</th><td>{_esc(_fmt_dt(ended_at))}</td></tr>
+        <tr><th style="text-align:left;">Downtime</th><td>about {_esc(_fmt_duration(duration))} (hourly checks; the real window may be up to an hour shorter on each side)</td></tr>
+        <tr><th style="text-align:left;">First error</th><td>{_esc(first_error)}</td></tr>
+      </table>
+      <div style="text-align:center;margin-top:24px;"><a href="{_esc(settings.FRONTEND_URL)}" class="btn">Open dashboard</a></div>
+    """
+    return await _send_mail(to_email, f"🟢 UP: {site_name} after {_fmt_duration(duration)}", _render_layout(f"{site_name} is back", content))

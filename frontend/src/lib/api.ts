@@ -12,6 +12,9 @@ import type {
   SchedulerJob,
   AuditModuleInfo,
   Finding,
+  MuteKind,
+  UptimeSummary,
+  GoogleTestResult,
 } from './types'
 
 export const api = axios.create({
@@ -148,8 +151,28 @@ export const sites = {
     })
     return response.data
   },
-  async getFindings(id: string, status: 'open' | 'resolved' | 'all' = 'open'): Promise<Finding[]> {
+  async getFindings(id: string, status: 'open' | 'resolved' | 'all' | 'muted' = 'open'): Promise<Finding[]> {
     const response = await api.get<Finding[]>(`/sites/${id}/findings`, { params: { status } })
+    return response.data
+  },
+  async muteFinding(siteId: string, findingId: string, kind: MuteKind, days?: number, note?: string): Promise<Finding> {
+    const response = await api.post<Finding>(`/sites/${siteId}/findings/${findingId}/mute`, { kind, days, note })
+    return response.data
+  },
+  async unmuteFinding(siteId: string, findingId: string): Promise<Finding> {
+    const response = await api.delete<Finding>(`/sites/${siteId}/findings/${findingId}/mute`)
+    return response.data
+  },
+  async verifyFinding(siteId: string, findingId: string): Promise<{ audit_run_id: string; modules: string[]; message: string }> {
+    const response = await api.post(`/sites/${siteId}/findings/${findingId}/verify`)
+    return response.data
+  },
+  async getUptime(id: string, days = 30): Promise<UptimeSummary> {
+    const response = await api.get<UptimeSummary>(`/sites/${id}/uptime`, { params: { days } })
+    return response.data
+  },
+  async checkUptimeNow(id: string): Promise<{ ok: boolean | null; status?: number; latency_ms?: number | null; error?: string | null; transition?: string | null }> {
+    const response = await api.post(`/sites/${id}/uptime/check`)
     return response.data
   },
   async getHistory(id: string, page?: number): Promise<{ audits: Audit[]; total?: number }> {
@@ -232,6 +255,14 @@ export const settings = {
   },
   async runAll(): Promise<{ message: string; triggered_count?: number }> {
     const response = await api.post<{ message: string; triggered_count?: number }>('/settings/scheduler/run-all')
+    return response.data
+  },
+  async testGoogle(): Promise<GoogleTestResult> {
+    const response = await api.post<GoogleTestResult>('/settings/test-google')
+    return response.data
+  },
+  async runUptimeNow(): Promise<{ checked: number; down: string[] }> {
+    const response = await api.post<{ checked: number; down: string[] }>('/settings/uptime/run-now')
     return response.data
   },
 }

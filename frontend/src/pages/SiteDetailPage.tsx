@@ -37,6 +37,7 @@ import ModuleCard from '../components/ModuleCard'
 import AuditRunsTable from '../components/AuditRunsTable'
 import BriefPanel from '../components/BriefPanel'
 import FindingsTable from '../components/FindingsTable'
+import UptimePanel from '../components/UptimePanel'
 import { formatDate, formatRelative } from '../lib/utils'
 import toast from 'react-hot-toast'
 
@@ -450,6 +451,9 @@ export const SiteDetailPage: React.FC = () => {
           </div>
         </div>
       </Modal>
+
+      {/* Hourly uptime probe */}
+      {id && <UptimePanel siteId={id} />}
 
       {/* Latest brief: what is broken, what changed, what to improve */}
       {latestAudit?.brief && (

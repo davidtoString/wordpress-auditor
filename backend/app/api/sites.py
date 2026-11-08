@@ -8,13 +8,15 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, HttpUrl
+from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from app.auditors.base import BaseAuditor
 from app.auth.utils import get_current_user, require_admin
 from app.database import get_db
-from app.models import AuditRun, Site, User
-from app.scheduler import dispatch_audit, reschedule_site, unschedule_site, normalize_modules
+from app.models import AuditRun, Finding, Site, UptimeIncident, User
+from app.scheduler import AUDIT_MODULES, dispatch_audit, reschedule_site, unschedule_site, normalize_modules
+from app.uptime import run_uptime_probe, uptime_summary
 
 router = APIRouter(prefix="/sites", tags=["sites"])
 
@@ -63,6 +65,7 @@ class SiteCreate(BaseModel):
     nap_name: Optional[str] = None
     nap_address: Optional[str] = None
     nap_phone: Optional[str] = None
+    search_console_property: Optional[str] = None
 
 
 class SiteUpdate(BaseModel):
@@ -76,6 +79,7 @@ class SiteUpdate(BaseModel):
     nap_name: Optional[str] = None
     nap_address: Optional[str] = None
     nap_phone: Optional[str] = None
+    search_console_property: Optional[str] = None
 
 
 class SiteResponse(BaseModel):
@@ -92,6 +96,7 @@ class SiteResponse(BaseModel):
     nap_name: Optional[str]
     nap_address: Optional[str]
     nap_phone: Optional[str]
+    search_console_property: Optional[str] = None
     created_at: datetime
     last_score: Optional[float] = None
     last_audit_at: Optional[datetime] = None
@@ -102,7 +107,12 @@ class SiteResponse(BaseModel):
     open_improve: int = 0
     new_last_run: int = 0
     changes_last_run: int = 0
-    state: Optional[str] = None  # "broken" | "attention" | "ok" | None (never audited)
+    state: Optional[str] = None  # "down" | "broken" | "attention" | "ok" | None (never audited)
+    # Hourly uptime probe
+    down_now: bool = False
+    down_since: Optional[datetime] = None
+    uptime_30d: Optional[float] = None
+    last_check_at: Optional[datetime] = None
 
 
 class AuditRunSummary(BaseModel):
@@ -127,16 +137,30 @@ def list_sites(
     db: Session = Depends(get_db),
 ):
     """List all sites with their latest audit status and score."""
-    from app.models import Finding
+    from datetime import timedelta
+    from app.models import UptimeCheck
 
     sites = db.query(Site).order_by(Site.created_at.desc()).all()
     results = []
     open_counts: dict = {}
     for f in db.query(Finding).filter(Finding.status == "open").all():
+        if f.is_muted:
+            continue
         c = open_counts.setdefault(f.site_id, {"urgent": 0, "improve": 0, "critical": 0})
         c["urgent" if f.section == "urgent" else "improve"] += 1
         if f.severity == "critical":
             c["critical"] += 1
+
+    open_incidents = {i.site_id: i for i in db.query(UptimeIncident).filter(UptimeIncident.ended_at.is_(None)).all()}
+    since = datetime.utcnow() - timedelta(days=30)
+    up_stats: dict = {}
+    for site_id, ok, n in (db.query(UptimeCheck.site_id, UptimeCheck.ok, sa_func.count())
+                           .filter(UptimeCheck.checked_at >= since).group_by(UptimeCheck.site_id, UptimeCheck.ok).all()):
+        st = up_stats.setdefault(site_id, {"ok": 0, "total": 0})
+        st["total"] += n
+        if ok:
+            st["ok"] += n
+    last_checks = dict(db.query(UptimeCheck.site_id, sa_func.max(UptimeCheck.checked_at)).group_by(UptimeCheck.site_id).all())
 
     for site in sites:
         # Headline score/status come from the latest *full* run; partial (module-subset) runs
@@ -171,8 +195,14 @@ def list_sites(
             "open_improve": counts["improve"],
             "new_last_run": (stats.get("urgent_new") or 0) + (stats.get("improve_new") or 0),
             "changes_last_run": stats.get("changes_notable") or 0,
-            "state": (None if not latest_run else "broken" if counts["critical"] else
+            "state": ("down" if site.id in open_incidents else None if not latest_run else "broken" if counts["critical"] else
                       "attention" if (counts["urgent"] or stats.get("changes_notable")) else "ok"),
+            "search_console_property": site.search_console_property,
+            "down_now": site.id in open_incidents,
+            "down_since": open_incidents[site.id].started_at if site.id in open_incidents else None,
+            "uptime_30d": (round(100.0 * up_stats[site.id]["ok"] / up_stats[site.id]["total"], 2)
+                           if site.id in up_stats and up_stats[site.id]["total"] else None),
+            "last_check_at": last_checks.get(site.id),
         })
         results.append(SiteResponse(**s_dict))
 
@@ -208,6 +238,7 @@ async def create_site(
         nap_name=payload.nap_name,
         nap_address=payload.nap_address,
         nap_phone=payload.nap_phone,
+        search_console_property=(payload.search_console_property or "").strip() or None,
         created_by_id=current_user.id,
         is_active=True,
     )
@@ -230,6 +261,7 @@ async def create_site(
         nap_name=site.nap_name,
         nap_address=site.nap_address,
         nap_phone=site.nap_phone,
+        search_console_property=site.search_console_property,
         created_at=site.created_at,
         url_redirect_warning=redirect_warning,
     )
@@ -253,6 +285,7 @@ def get_site(
         .first()
     )
 
+    up = uptime_summary(db, site.id, 30)
     return SiteResponse(
         id=site.id,
         name=site.name,
@@ -265,10 +298,15 @@ def get_site(
         nap_name=site.nap_name,
         nap_address=site.nap_address,
         nap_phone=site.nap_phone,
+        search_console_property=site.search_console_property,
         created_at=site.created_at,
         last_score=latest_run.overall_score if latest_run else None,
         last_audit_at=latest_run.completed_at or latest_run.created_at if latest_run else None,
         last_status=latest_run.status if latest_run else None,
+        down_now=up["down_now"],
+        down_since=datetime.fromisoformat(up["down_since"]) if up["down_since"] else None,
+        uptime_30d=up["uptime_pct"],
+        last_check_at=datetime.fromisoformat(up["last_check_at"]) if up["last_check_at"] else None,
     )
 
 
@@ -304,6 +342,8 @@ async def update_site(
         site.nap_address = payload.nap_address
     if payload.nap_phone is not None:
         site.nap_phone = payload.nap_phone
+    if payload.search_console_property is not None:
+        site.search_console_property = payload.search_console_property.strip() or None
     if payload.is_active is not None:
         site.is_active = payload.is_active
 
@@ -325,6 +365,7 @@ async def update_site(
         nap_name=site.nap_name,
         nap_address=site.nap_address,
         nap_phone=site.nap_phone,
+        search_console_property=site.search_console_property,
         created_at=site.created_at,
         url_redirect_warning=redirect_warning,
     )
@@ -485,12 +526,122 @@ class FindingResponse(BaseModel):
     times_seen: int
     first_seen_run_id: Optional[uuid.UUID]
     last_seen_run_id: Optional[uuid.UUID]
+    mute_kind: Optional[str] = None
+    mute_until: Optional[datetime] = None
+    mute_note: Optional[str] = None
+    muted_at: Optional[datetime] = None
+    muted_by: Optional[str] = None
+    is_muted: bool = False
+
+
+class MuteRequest(BaseModel):
+    kind: Literal["acknowledged", "snoozed", "accepted"]
+    days: Optional[int] = None  # snoozed: how long; default 30
+    note: Optional[str] = None
+
+
+def _finding_or_404(db: Session, site_id: uuid.UUID, finding_id: uuid.UUID) -> Finding:
+    row = db.query(Finding).filter(Finding.id == finding_id, Finding.site_id == site_id).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found")
+    return row
+
+
+@router.post("/{site_id}/findings/{finding_id}/mute", response_model=FindingResponse)
+def mute_finding(
+    site_id: uuid.UUID,
+    finding_id: uuid.UUID,
+    payload: MuteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Acknowledge (working on it), snooze (hide for N days) or accept (known risk, hide for
+    good). The finding stays tracked and still resolves when the problem disappears; if it
+    comes back after resolving, the mute is cleared so it alerts again."""
+    row = _finding_or_404(db, site_id, finding_id)
+    from datetime import timedelta
+    row.mute_kind = payload.kind
+    row.mute_until = (datetime.utcnow() + timedelta(days=max(1, min(365, payload.days or 30)))) if payload.kind == "snoozed" else None
+    row.mute_note = (payload.note or "").strip()[:1000] or None
+    row.muted_at = datetime.utcnow()
+    row.muted_by = current_user.email
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@router.delete("/{site_id}/findings/{finding_id}/mute", response_model=FindingResponse)
+def unmute_finding(
+    site_id: uuid.UUID,
+    finding_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    row = _finding_or_404(db, site_id, finding_id)
+    row.mute_kind = None
+    row.mute_until = None
+    row.mute_note = None
+    row.muted_at = None
+    row.muted_by = None
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@router.post("/{site_id}/findings/{finding_id}/verify")
+def verify_finding(
+    site_id: uuid.UUID,
+    finding_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Re-run just the module that produced this finding. The partial run reconciles that
+    module's findings, so the item resolves if the fix worked, without a full audit."""
+    row = _finding_or_404(db, site_id, finding_id)
+    if row.status != "open":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Finding is already resolved")
+    module = row.module
+    if module == "crawl":
+        module = "seo"  # any page-crawling module re-fetches the sitemap pages
+    if module not in AUDIT_MODULES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Cannot re-run module '{row.module}'")
+    modules = [module] + (["unlighthouse"] if module == "visual" else [])
+    audit_run_id = dispatch_audit(str(site_id), "manual", "quick", modules)
+    return {"audit_run_id": audit_run_id, "modules": modules,
+            "message": f"Re-checking {module.replace('_', ' ')}; the finding resolves automatically if it is gone."}
+
+
+@router.get("/{site_id}/uptime")
+def get_site_uptime(
+    site_id: uuid.UUID,
+    days: int = Query(30, ge=1, le=90),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    site = db.query(Site).filter(Site.id == site_id).first()
+    if not site:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
+    return uptime_summary(db, site.id, days)
+
+
+@router.post("/{site_id}/uptime/check")
+async def check_site_uptime_now(
+    site_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Probe this one site now (retries 20s apart instead of a minute)."""
+    site = db.query(Site).filter(Site.id == site_id).first()
+    if not site:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
+    outcomes = await run_uptime_probe(retry_delay=20, only_site_id=str(site.id))
+    return outcomes[0] if outcomes else {"ok": None, "error": "probe produced no result"}
 
 
 @router.get("/{site_id}/findings", response_model=List[FindingResponse])
 def list_site_findings(
     site_id: uuid.UUID,
-    status_filter: str = Query("open", alias="status", pattern="^(open|resolved|all)$"),
+    status_filter: str = Query("open", alias="status", pattern="^(open|resolved|all|muted)$"),
     limit: int = Query(200, ge=1, le=1000),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -503,8 +654,18 @@ def list_site_findings(
     if not site:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
     q = db.query(Finding).filter(Finding.site_id == site.id)
-    if status_filter != "all":
-        q = q.filter(Finding.status == status_filter)
-    rows = q.all()
+    if status_filter == "muted":
+        rows = [f for f in q.filter(Finding.status == "open").all() if f.is_muted]
+    elif status_filter == "open":
+        rows = [f for f in q.filter(Finding.status == "open").all() if not f.is_muted]
+    else:
+        if status_filter != "all":
+            q = q.filter(Finding.status == status_filter)
+        rows = q.all()
     rows.sort(key=lambda f: (f.status != "open", SEVERITY_ORDER.get(f.severity, 9), f.first_seen_at))
-    return rows[:limit]
+    out = []
+    for f in rows[:limit]:
+        item = FindingResponse.model_validate(f)
+        item.is_muted = f.is_muted
+        out.append(item)
+    return out

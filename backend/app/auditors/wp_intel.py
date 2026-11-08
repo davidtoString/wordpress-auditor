@@ -189,3 +189,48 @@ def plugin_slug(plugin_file: str | None) -> str | None:
         return None
     head = plugin_file.split("/")[0]
     return head[:-4] if head.endswith(".php") else head
+
+
+WPORG_THEME_INFO = "https://api.wordpress.org/themes/info/1.2/"
+
+
+async def theme_vulnerabilities(client: httpx.AsyncClient, slug: str, version: str | None) -> dict[str, Any]:
+    """Known vulnerabilities for a theme slug, split into those affecting `version`."""
+    key = f"wpv:theme:{slug}"
+    data = _cached(key)
+    if data is None:
+        data = await _get_json(client, f"{WPV_BASE}/theme/{slug}/") or {}
+        _store(key, data)
+    payload = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(payload, dict):
+        return {"known": 0, "affecting": [], "lookup_ok": False}
+    vulns = payload.get("vulnerability") or []
+    affecting = [_summarize_vuln(v) for v in vulns if version_matches(version, v.get("operator"))]
+    return {"known": len(vulns), "affecting": affecting, "lookup_ok": True}
+
+
+async def theme_latest_version(client: httpx.AsyncClient, slug: str) -> str | None:
+    """Latest version on wordpress.org, or None for premium/custom themes."""
+    key = f"wporg:theme:{slug}"
+    hit = _cached(key)
+    if hit is not None:
+        return hit or None
+    data = await _get_json(client, WPORG_THEME_INFO, params={
+        "action": "theme_information", "request[slug]": slug,
+        "request[fields][sections]": "0", "request[fields][description]": "0",
+    })
+    latest = data.get("version") if isinstance(data, dict) else None
+    _store(key, latest or "")
+    return latest
+
+
+THEME_HEADER_RE = re.compile(r"^\s*\*?\s*(Theme Name|Version|Template|Author)\s*:\s*(.+?)\s*$", re.I | re.M)
+
+
+def parse_theme_header(css: str) -> dict[str, str]:
+    """Theme Name / Version / Template from the top of a theme's style.css."""
+    head = css[:4000]
+    out: dict[str, str] = {}
+    for m in THEME_HEADER_RE.finditer(head):
+        out[m.group(1).lower().replace(" ", "_")] = m.group(2).strip()
+    return out
