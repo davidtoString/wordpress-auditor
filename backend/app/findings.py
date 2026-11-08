@@ -14,6 +14,7 @@ assembles the three-section brief that the UI and the alert email show:
 from __future__ import annotations
 
 import hashlib
+import re
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -61,6 +62,22 @@ class FindingSpec:
             "type": self.type, "severity": self.severity, "title": self.title, "module": self.module,
             "section": self.section, "url": self.url, "detail": self.detail, "fingerprint": self.fingerprint,
         }
+
+
+_QUOTE_RE = re.compile(r"[\'\u2018\u2019\"\u201c\u201d]([^\'\u2018\u2019\"\u201c\u201d]{3,60})[\'\u2018\u2019\"\u201c\u201d]")
+
+
+def _quoted(text: str) -> str | None:
+    """First quoted phrase in a vision description, e.g. the section heading it names."""
+    m = _QUOTE_RE.search(text or "")
+    return m.group(1).strip() if m else None
+
+
+def _visual_issue_key(issue: dict[str, Any]) -> str:
+    heading = _quoted(issue.get("description") or "")
+    if heading:
+        return heading.lower()
+    return f"{(issue.get('type') or 'issue').lower()}|{(issue.get('location') or '')[:40].lower()}"
 
 
 def _path(url: str | None, site_url: str) -> str:
@@ -433,17 +450,37 @@ def extract_findings(
                     title=issue)
 
     vis = d("visual")
-    for p in vis.get("pages") or []:
+    # The same defect usually sits in a shared template or widget (an empty "Client Reviews"
+    # block on every service page). Group issues by their quoted heading/type across pages: three
+    # or more pages become one site-level finding, the rest stay per page.
+    vis_pages = [p for p in (vis.get("pages") or []) if (p.get("verdict") or {}).get("broken")]
+    grouped: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for p in vis_pages:
+        for i in ((p.get("verdict") or {}).get("issues") or []):
+            grouped.setdefault(_visual_issue_key(i), []).append((p, i))
+    aggregated_keys = {k for k, items in grouped.items() if len({pp.get("url") for pp, _ in items}) >= 3}
+    for k in sorted(aggregated_keys):
+        items = grouped[k]
+        urls = sorted({pp.get("url") for pp, _ in items if pp.get("url")})
+        sample = items[0][1]
+        heading = _quoted(sample.get("description") or "") or sample.get("location") or sample.get("type") or "section"
+        add(type="visual_broken_sitewide", severity="high", section="urgent", module="visual", key=k,
+            title=f"'{heading}' looks broken on {len(urls)} pages: {(sample.get('description') or '')[:90]}",
+            detail={"pages": urls[:40], "count": len(urls), "issue_type": sample.get("type"),
+                    "flagged_sections": [ii.get("tile_url") for _, ii in items if ii.get("tile_url")][:8],
+                    "viewports": sorted({ii.get("viewport") for _, ii in items if ii.get("viewport")})})
+    for p in vis_pages:
         verdict = p.get("verdict") or {}
-        if verdict.get("broken"):
-            issues = verdict.get("issues") or []
-            where = sorted({i.get("viewport") for i in issues if i.get("viewport")})
-            add(type="visual_broken", severity="high", section="urgent", module="visual", url=p.get("url"),
-                title=f"Page looks broken{' on ' + '/'.join(where) if where else ''}: {p.get('path')} "
-                      f"({'; '.join(i.get('description', '')[:80] for i in issues[:2])})",
-                detail={"issues": issues, "screenshot_url": p.get("screenshot_url"), "mobile_url": p.get("mobile_url"),
-                        "flagged_sections": [i.get("tile_url") for i in issues if i.get("tile_url")][:6],
-                        "confidence": verdict.get("confidence"), "sections_reviewed": verdict.get("sections_reviewed")})
+        issues = [i for i in (verdict.get("issues") or []) if _visual_issue_key(i) not in aggregated_keys]
+        if not issues:
+            continue
+        where = sorted({i.get("viewport") for i in issues if i.get("viewport")})
+        add(type="visual_broken", severity="high", section="urgent", module="visual", url=p.get("url"),
+            title=f"Page looks broken{' on ' + '/'.join(where) if where else ''}: {p.get('path')} "
+                  f"({'; '.join(i.get('description', '')[:80] for i in issues[:2])})",
+            detail={"issues": issues, "screenshot_url": p.get("screenshot_url"), "mobile_url": p.get("mobile_url"),
+                    "flagged_sections": [i.get("tile_url") for i in issues if i.get("tile_url")][:6],
+                    "confidence": verdict.get("confidence"), "sections_reviewed": verdict.get("sections_reviewed")})
 
     sc = d("search_console")
     if sc and sc.get("configured"):

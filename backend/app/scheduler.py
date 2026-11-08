@@ -508,6 +508,9 @@ async def execute_site_audit(
             page_statuses: dict[str, int] = {}
             fetch_sem = asyncio.Semaphore(4)
             target_paths: list[str] = ["/"]
+            # Visual inspection covers WordPress Pages only (home, services, contact...). Blog posts
+            # share one template; screenshotting hundreds of them costs time and money for nothing.
+            visual_paths: list[str] = ["/"]
             crawl_stats: dict[str, Any] = {}
 
             if needs_pages:
@@ -542,6 +545,10 @@ async def execute_site_audit(
                     await asyncio.gather(*[_fetch_one(client, u) for u in crawl.target_urls])
 
                 target_paths = list(dict.fromkeys((urlparse(u).path or "/") for u in crawl.target_urls)) or ["/"]
+                page_set = {(urlparse(u).path or "/").rstrip("/") or "/" for u in crawl.pages}
+                visual_paths = ["/"] + [p for p in target_paths if p != "/" and (p.rstrip("/") or "/") in page_set]
+                if len(visual_paths) == 1 and not crawl.pages:
+                    visual_paths = target_paths  # sitemap did not classify anything: fall back to the scan set
 
             # 3. Concurrent modules
             factories: dict[str, Any] = {
@@ -586,7 +593,7 @@ async def execute_site_audit(
                 lh = next((r for r in results if r.module == "unlighthouse"), None)
                 try:
                     # Runs after Lighthouse so the browser work does not skew its CPU-sensitive scores.
-                    results.append(await run_visual_check(site.url, target_paths, lh.details if lh else None))
+                    results.append(await run_visual_check(site.url, visual_paths, lh.details if lh else None))
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:

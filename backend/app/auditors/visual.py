@@ -38,8 +38,8 @@ VIEWPORTS = {
     "desktop": {"width": 1366, "height": 850, "mobile": False},
     "mobile": {"width": 390, "height": 844, "mobile": True},
 }
-CAPTURE_CONCURRENCY = 3
-PAGE_TIMEOUT_MS = 45000
+CAPTURE_CONCURRENCY = 4
+PAGE_TIMEOUT_MS = 30000
 MODULE_TIME_BUDGET_S = 40 * 60
 CHANGED_THRESHOLD = 0.20       # share of differing pixels that counts as "changed" (sliders/animations move ~0.1-0.25)
 PIXEL_TOLERANCE = 40           # per-channel difference below this is "same" (JPEG noise, antialiasing)
@@ -79,6 +79,21 @@ _DISMISS_SELECTORS = [
 ]
 
 
+# Copy typos and section-edge crops are not "the page is broken"; the prompt says so, the model
+# still reports them now and then, and an urgent email about a missing space helps nobody.
+_NOISE_RE = re.compile(
+    r"(cut ?off|cropped|truncated|clipped)\b.*\b(top|bottom|edge)|\b(top|bottom|edge)\b.*(cut ?off|cropped|truncated|clipped)"
+    r"|lacks? (a |proper )?spac|missing (a )?space|spacing|typo|punctuation|hyphen|spell|grammar|capitali[sz]"
+    r"|recaptcha|chat (widget|bubble)|cookie",
+    re.IGNORECASE,
+)
+
+
+def _is_noise(issue: dict[str, Any]) -> bool:
+    text = f"{issue.get('type') or ''} {issue.get('description') or ''}"
+    return bool(_NOISE_RE.search(text))
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
@@ -101,14 +116,47 @@ def _url_for(site_url: str, rel: Path) -> str:
 async def _scroll_through(page) -> None:
     height = await page.evaluate("document.body.scrollHeight")
     y, steps = 0, 0
-    while y < height and steps < 60:
-        y += 600
+    while y < height and steps < 40:
+        y += 800
         steps += 1
         await page.evaluate(f"window.scrollTo(0, {y})")
-        await page.wait_for_timeout(250)
+        await page.wait_for_timeout(180)
         height = await page.evaluate("document.body.scrollHeight")
     await page.evaluate("window.scrollTo(0, 0)")
-    await page.wait_for_timeout(900)
+    await page.wait_for_timeout(700)
+
+
+_UNSTICK_JS = """
+() => {
+  // Full-page captures paint position:fixed/sticky elements once, over whatever content sits at
+  // that offset (a sticky header lands in the middle of a long page). Pin them where they are.
+  const els = Array.from(document.querySelectorAll('body *'));
+  let n = 0;
+  for (const el of els) {
+    const cs = getComputedStyle(el);
+    if (cs.position === 'fixed') {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0 || cs.visibility === 'hidden' || cs.display === 'none') continue;
+      el.style.setProperty('position', 'absolute', 'important');
+      el.style.setProperty('top', (r.top + window.scrollY) + 'px', 'important');
+      el.style.setProperty('bottom', 'auto', 'important');
+      n++;
+    } else if (cs.position === 'sticky') {
+      el.style.setProperty('position', 'static', 'important');
+      n++;
+    }
+  }
+  return n;
+}
+"""
+
+
+async def _unstick(page) -> None:
+    try:
+        await page.evaluate(_UNSTICK_JS)
+        await page.wait_for_timeout(150)
+    except Exception:
+        pass
 
 
 async def _dismiss_banners(page) -> None:
@@ -140,10 +188,10 @@ async def _capture_page(browser, url: str, out_dir: Path, device: dict[str, Any]
                     is_mobile=vp["mobile"], has_touch=vp["mobile"], ignore_https_errors=True,
                 )
             page = await ctx.new_page()
-            try:
-                resp = await page.goto(url, wait_until="networkidle", timeout=PAGE_TIMEOUT_MS)
-            except Exception:
-                resp = await page.goto(url, wait_until="load", timeout=PAGE_TIMEOUT_MS)
+            # "load" plus a short settle: waiting for network idle on pages with chat widgets,
+            # analytics and ad pixels often runs to the timeout without anything visible changing.
+            resp = await page.goto(url, wait_until="load", timeout=PAGE_TIMEOUT_MS)
+            await page.wait_for_timeout(1200)
             out["status"] = resp.status if resp else None
             if resp is not None and resp.status >= 400:
                 # A block page (403 from a WAF) or an error page is not the site; do not judge it.
@@ -157,6 +205,7 @@ async def _capture_page(browser, url: str, out_dir: Path, device: dict[str, Any]
             except Exception:
                 pass
             await _scroll_through(page)
+            await _unstick(page)
             path = out_dir / f"{name}.jpeg"
             await page.screenshot(path=str(path), full_page=True, type="jpeg", quality=72)
             height = await page.evaluate("document.body.scrollHeight")
@@ -304,7 +353,9 @@ async def review_page(client, page: dict[str, Any], site_url: str, out_dir: Path
         sections_total += 1
         tokens += v.get("_tokens") or 0
         conf = float(v.get("confidence") or 0)
-        if v.get("broken") and conf >= BROKEN_CONFIDENCE:
+        real_issues = [i for i in (v.get("issues") or []) if not _is_noise(i)]
+        if v.get("broken") and conf >= BROKEN_CONFIDENCE and real_issues:
+            v["issues"] = real_issues
             sections_broken += 1
             confidences.append(conf)
             tile_file = out_dir / f"flag_{viewport}_{idx + 1}.jpeg"
