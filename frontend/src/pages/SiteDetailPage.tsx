@@ -39,6 +39,7 @@ import BriefPanel from '../components/BriefPanel'
 import FindingsTable from '../components/FindingsTable'
 import UptimePanel from '../components/UptimePanel'
 import { formatDate, formatRelative } from '../lib/utils'
+import { describeCron } from '../lib/cron'
 import toast from 'react-hot-toast'
 
 export const SiteDetailPage: React.FC = () => {
@@ -251,7 +252,9 @@ export const SiteDetailPage: React.FC = () => {
             <span>&bull;</span>
             <span className="flex items-center gap-1">
               <Calendar className="w-3.5 h-3.5 text-slate-400" />
-              Cron: <code className="font-mono">{site.cron_schedule}</code>
+              <span title={`cron: ${site.cron_schedule} (Mexico City)`}>
+                {site.is_active === false ? 'Manual only' : `Full audit ${describeCron(site.cron_schedule).replace(/^Daily/, 'daily').replace(/^Every/, 'every').replace(/^Weekdays/, 'weekdays').replace(/^Monthly/, 'monthly').replace(/^Custom/, 'custom')}`}
+              </span>
             </span>
             <span>&bull;</span>
             <span>Last Audit: {formatRelative(site.last_audit_at)}</span>
@@ -576,7 +579,7 @@ export const SiteDetailPage: React.FC = () => {
               No audit module results yet
             </h4>
             <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 mb-4">
-              Trigger a manual audit or wait for the cron schedule to execute to inspect the 12 audit modules.
+              Trigger a manual audit or wait for the scheduled full audit to inspect the audit modules.
             </p>
             <button
               onClick={() => triggerMutation.mutate({ scope: auditScope, modules: selectedModules })}

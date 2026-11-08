@@ -15,7 +15,18 @@ from app.auditors.base import BaseAuditor
 from app.auth.utils import get_current_user, require_admin
 from app.database import get_db
 from app.models import AuditRun, Finding, Site, UptimeIncident, User
-from app.scheduler import AUDIT_MODULES, dispatch_audit, reschedule_site, unschedule_site, normalize_modules
+from app.scheduler import (AUDIT_MODULES, _parse_cron_trigger, dispatch_audit, reschedule_site, unschedule_site,
+                           normalize_modules)
+
+
+def _validate_cron(expr: str) -> str:
+    expr = (expr or "").strip()
+    try:
+        _parse_cron_trigger(expr)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"Invalid schedule: {exc}")
+    return expr
 from app.uptime import run_uptime_probe, uptime_summary
 
 router = APIRouter(prefix="/sites", tags=["sites"])
@@ -231,7 +242,7 @@ async def create_site(
         id=uuid.uuid4(),
         name=payload.name,
         url=norm_url,
-        cron_schedule=payload.cron_schedule,
+        cron_schedule=_validate_cron(payload.cron_schedule),
         notify_email=payload.notify_email,
         wp_username=payload.wp_username,
         wp_app_password=payload.wp_app_password,
@@ -329,7 +340,7 @@ async def update_site(
         site.url = payload.url.rstrip("/")
         redirect_warning = await detect_canonical_mismatch(site.url)
     if payload.cron_schedule is not None:
-        site.cron_schedule = payload.cron_schedule
+        site.cron_schedule = _validate_cron(payload.cron_schedule)
     if payload.notify_email is not None:
         site.notify_email = payload.notify_email
     if payload.wp_username is not None:

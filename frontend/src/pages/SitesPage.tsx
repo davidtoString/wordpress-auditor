@@ -17,6 +17,7 @@ import {
 import { sites as sitesApi } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import type { Site } from '../lib/types'
+import { describeCron } from '../lib/cron'
 import ScoreBadge from '../components/ScoreBadge'
 import Modal from '../components/ui/Modal'
 import { formatDate, formatRelative } from '../lib/utils'
@@ -97,7 +98,7 @@ export const SitesPage: React.FC = () => {
             Managed Sites
           </h2>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-            Configure target WordPress websites, automated cron intervals, and audit credentials.
+            Configure target WordPress websites, their full-audit schedule, and audit credentials.
           </p>
         </div>
 
@@ -221,7 +222,7 @@ export const SitesPage: React.FC = () => {
                   <th className="py-3.5 px-5">Website Details</th>
                   <th className="py-3.5 px-4">Audit Score</th>
                   <th className="py-3.5 px-4">Last Audit</th>
-                  <th className="py-3.5 px-4">Cron Schedule</th>
+                  <th className="py-3.5 px-4">Schedule</th>
                   <th className="py-3.5 px-4">Status</th>
                   <th className="py-3.5 px-5 text-right">Actions</th>
                 </tr>
@@ -261,9 +262,12 @@ export const SitesPage: React.FC = () => {
                     </td>
 
                     <td className="py-4 px-4">
-                      <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-xs font-mono text-slate-700 dark:text-slate-300">
+                      <div
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-xs text-slate-700 dark:text-slate-300"
+                        title={`cron: ${site.cron_schedule || '0 6 * * *'} (Mexico City)`}
+                      >
                         <Calendar className="w-3 h-3 text-slate-400" />
-                        {site.cron_schedule || '0 6 * * *'}
+                        {site.is_active === false ? 'Manual only' : describeCron(site.cron_schedule || '0 6 * * *')}
                       </div>
                     </td>
 

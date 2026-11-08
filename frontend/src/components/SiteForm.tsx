@@ -10,12 +10,14 @@ import {
   Loader2,
   Info,
   Check,
+  Clock,
   ShieldCheck,
   ShieldAlert,
   PlugZap,
 } from 'lucide-react'
 import type { Site, SiteCreateInput } from '../lib/types'
 import { sites as sitesApi } from '../lib/api'
+import { DEFAULT_SCHEDULE, WEEKDAYS, buildCron, describeCron, parseCron, type SimpleSchedule } from '../lib/cron'
 
 interface SiteFormProps {
   initialValues?: Partial<Site>
@@ -71,12 +73,21 @@ export const SiteForm: React.FC<SiteFormProps> = ({
   const [napPhone, setNapPhone] = useState(initialValues?.nap_phone || '')
   const [scProperty, setScProperty] = useState(initialValues?.search_console_property || '')
 
-  const cronPresets = [
-    { label: 'Daily 6 AM', value: '0 6 * * *' },
-    { label: 'Daily Midnight', value: '0 0 * * *' },
-    { label: 'Weekly Monday', value: '0 6 * * 1' },
-    { label: 'Hourly', value: '0 * * * *' },
-  ]
+  const [showRawCron, setShowRawCron] = useState(false)
+  const simpleSchedule = parseCron(cronSchedule)
+  const scheduleBase: SimpleSchedule = simpleSchedule ?? DEFAULT_SCHEDULE
+  const setSchedule = (patch: Partial<SimpleSchedule>) => {
+    setCronSchedule(buildCron({ ...scheduleBase, ...patch }))
+    setIsActive(true)
+  }
+  const chipClass = (active: boolean) =>
+    `text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+      active
+        ? 'bg-brand-50 dark:bg-brand-950/60 border-brand-500 text-brand-600 dark:text-brand-400 font-semibold'
+        : 'border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400'
+    }`
+  const isKind = (kind: SimpleSchedule['kind'], dow?: number) =>
+    isActive && !!simpleSchedule && simpleSchedule.kind === kind && (dow === undefined || simpleSchedule.dow === dow)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -158,47 +169,34 @@ export const SiteForm: React.FC<SiteFormProps> = ({
             </div>
           </div>
 
-          {/* Cron Schedule */}
+          {/* Schedule */}
           <div>
-            <label
-              htmlFor="cronSchedule"
-              className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5"
-            >
-              Cron Schedule Expression{' '}
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+              Audit Schedule{' '}
               <span className="normal-case font-normal text-slate-400">(Mexico City time)</span>
             </label>
-            <div className="flex flex-col sm:flex-row gap-3">
-              <input
-                id="cronSchedule"
-                type="text"
-                required={isActive}
-                disabled={!isActive}
-                value={cronSchedule}
-                onChange={(e) => setCronSchedule(e.target.value)}
-                placeholder="0 6 * * *"
-                className="flex-1 px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              />
-            </div>
-            {/* Presets */}
-            <div className="flex flex-wrap gap-2 mt-2.5">
-              <span className="text-xs text-slate-400 self-center mr-1">Presets:</span>
-              {cronPresets.map((preset) => (
+
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => setSchedule({ kind: 'daily' })} className={chipClass(isKind('daily'))}>
+                Every day
+              </button>
+              {WEEKDAYS.map((w) => (
                 <button
-                  key={preset.value}
+                  key={w.value}
                   type="button"
-                  onClick={() => {
-                    setCronSchedule(preset.value)
-                    setIsActive(true)
-                  }}
-                  className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                    isActive && cronSchedule === preset.value
-                      ? 'bg-brand-50 dark:bg-brand-950/60 border-brand-500 text-brand-600 dark:text-brand-400 font-semibold'
-                      : 'border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400'
-                  }`}
+                  onClick={() => setSchedule({ kind: 'weekly', dow: w.value })}
+                  className={chipClass(isKind('weekly', w.value))}
+                  title={`Every ${w.label}`}
                 >
-                  {preset.label} ({preset.value})
+                  {w.short}
                 </button>
               ))}
+              <button type="button" onClick={() => setSchedule({ kind: 'weekdays' })} className={chipClass(isKind('weekdays'))}>
+                Weekdays
+              </button>
+              <button type="button" onClick={() => setSchedule({ kind: 'monthly', dom: 1 })} className={chipClass(isKind('monthly'))}>
+                1st of month
+              </button>
               <button
                 type="button"
                 onClick={() => setIsActive(false)}
@@ -208,14 +206,76 @@ export const SiteForm: React.FC<SiteFormProps> = ({
                     : 'border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400'
                 }`}
               >
-                No automatic audit (manual only)
+                Manual only
               </button>
             </div>
-            {!isActive && (
-              <p className="text-xs text-slate-400 mt-1.5">
-                Automated scheduled audits are off for this site — audits only run when triggered manually.
-              </p>
+
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-slate-400" />
+                <span className="text-xs text-slate-500">at</span>
+                <select
+                  value={scheduleBase.hour}
+                  disabled={!isActive || !simpleSchedule}
+                  onChange={(e) => setSchedule({ hour: Number(e.target.value) })}
+                  className="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50"
+                >
+                  {Array.from({ length: 24 }, (_, h) => (
+                    <option key={h} value={h}>
+                      {h % 12 === 0 ? 12 : h % 12} {h < 12 ? 'AM' : 'PM'}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={scheduleBase.minute}
+                  disabled={!isActive || !simpleSchedule}
+                  onChange={(e) => setSchedule({ minute: Number(e.target.value) })}
+                  className="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50"
+                >
+                  {[0, 15, 30, 45].map((m) => (
+                    <option key={m} value={m}>
+                      :{String(m).padStart(2, '0')}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {isActive && (
+                <span className="text-sm font-medium text-slate-800 dark:text-slate-200">
+                  {describeCron(cronSchedule)}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowRawCron((v) => !v)}
+                className="ml-auto text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 underline-offset-2 hover:underline"
+              >
+                {showRawCron ? 'Hide cron expression' : 'Edit cron expression'}
+              </button>
+            </div>
+
+            {(showRawCron || (isActive && !simpleSchedule)) && (
+              <div className="mt-2">
+                <input
+                  id="cronSchedule"
+                  type="text"
+                  required={isActive}
+                  disabled={!isActive}
+                  value={cronSchedule}
+                  onChange={(e) => setCronSchedule(e.target.value)}
+                  placeholder="0 6 * * 1"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                />
+                <p className="text-xs text-slate-400 mt-1">
+                  Five fields: minute hour day-of-month month day-of-week (0 = Sunday). Expressions outside the presets are kept as typed.
+                </p>
+              </div>
             )}
+
+            <p className="text-xs text-slate-400 mt-2">
+              {isActive
+                ? 'Scheduled audits always run the full scope: every page and post in the sitemap (up to 500 URLs), Lighthouse on up to 60 of them, plus WordPress, security, SEO and Search Console checks. Sites sharing a slot run one after another.'
+                : 'Automated scheduled audits are off for this site — audits only run when triggered manually.'}
+            </p>
           </div>
 
           {/* Notification Email Override */}

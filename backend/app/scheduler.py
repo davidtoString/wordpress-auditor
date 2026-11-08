@@ -104,9 +104,25 @@ def dispatch_audit(
         db.commit()
     finally:
         db.close()
-    task = asyncio.create_task(execute_site_audit(site_id_str, triggered_by, scope, audit_run_id, selected))
-    _RUNNING_AUDIT_TASKS[str(audit_run_id)] = task
-    task.add_done_callback(lambda _t: _RUNNING_AUDIT_TASKS.pop(str(audit_run_id), None))
+    coro = execute_site_audit(site_id_str, triggered_by, scope, audit_run_id, selected)
+
+    def _start() -> None:
+        task = asyncio.create_task(coro)
+        _RUNNING_AUDIT_TASKS[str(audit_run_id)] = task
+        task.add_done_callback(lambda _t: _RUNNING_AUDIT_TASKS.pop(str(audit_run_id), None))
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # Called from a worker thread (sync FastAPI endpoint, APScheduler thread): hand the task
+        # to the main loop instead of failing with "no running event loop".
+        loop = _MAIN_LOOP
+        if loop is None or not loop.is_running():
+            coro.close()
+            raise RuntimeError("audit loop is not running; cannot queue audit")
+        loop.call_soon_threadsafe(_start)
+    else:
+        _start()
     return audit_run_id
 
 
@@ -199,14 +215,48 @@ def compute_overall_score(module_scores: list[tuple[str, float | None]]) -> floa
 
 APP_TIMEZONE = "America/Mexico_City"
 
+# Scheduled (cron) audits always run the full scope: every URL the sitemap lists (pages, posts,
+# other types, up to the crawler's safety cap) and Lighthouse on up to LH_MAX_ROUTES_FULL of them.
+# "quick" is for manual spot checks from the UI; a scheduled audit that skipped half the site
+# would report a clean bill of health it has not earned.
+SCHEDULED_SCOPE = "full"
+
+
+# Standard cron numbers weekdays 0=Sunday..6=Saturday (7=Sunday too). APScheduler 3.x numbers
+# them 0=Monday..6=Sunday and from_crontab() does not translate, so "0 6 * * 1" (every Monday)
+# silently ran on Tuesdays. Numeric day-of-week fields are converted to names, which both agree on.
+_CRON_DOW_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _translate_dow(field: str) -> str:
+    def name(x: str) -> str:
+        return _CRON_DOW_NAMES[int(x)] if x.isdigit() and 0 <= int(x) <= 7 else x
+
+    out = []
+    for part in field.split(","):
+        rng, _, step = part.partition("/")
+        if rng in ("0-6", "0-7", "1-7"):
+            out.append("*" + (f"/{step}" if step else ""))
+            continue
+        out.append("-".join(name(x) for x in rng.split("-")) + (f"/{step}" if step else ""))
+    return ",".join(out)
+
 
 def _parse_cron_trigger(cron_str: str) -> CronTrigger:
     parts = cron_str.strip().split()
-    if len(parts) == 5:
-        minute, hour, day, month, day_of_week = parts
-        return CronTrigger(minute=minute, hour=hour, day=day, month=month, day_of_week=day_of_week,
-                           timezone=APP_TIMEZONE)
-    return CronTrigger.from_crontab(cron_str, timezone=APP_TIMEZONE)
+    if len(parts) != 5:
+        raise ValueError(f"cron expression must have 5 fields, got {len(parts)}: {cron_str!r}")
+    minute, hour, day, month, day_of_week = parts
+    return CronTrigger(minute=minute, hour=hour, day=day, month=month, day_of_week=_translate_dow(day_of_week),
+                       timezone=APP_TIMEZONE)
+
+
+def describe_next_run(cron_str: str) -> str:
+    try:
+        nxt = _parse_cron_trigger(cron_str).get_next_fire_time(None, datetime.now(timezone.utc))
+        return nxt.strftime("%a %Y-%m-%d %H:%M %Z") if nxt else "never"
+    except Exception as exc:
+        return f"invalid ({exc})"
 
 
 def schedule_site_audit(site: Site) -> None:
@@ -218,7 +268,8 @@ def schedule_site_audit(site: Site) -> None:
             replace_existing=True, name=f"Audit for {site.name} ({site.url})",
             misfire_grace_time=3600, coalesce=True,
         )
-        logger.info("Scheduled audit job '%s' with cron '%s'", job_id, site.cron_schedule)
+        logger.info("Scheduled full audit job '%s' with cron '%s', next run %s", job_id, site.cron_schedule,
+                    describe_next_run(site.cron_schedule or "0 6 * * *"))
     except Exception as exc:
         logger.error("Failed scheduling site %s: %s", site.id, exc)
 
@@ -244,14 +295,14 @@ def trigger_scheduled_audit(site_id_str: str) -> None:
         loop.call_soon_threadsafe(_dispatch_from_thread, site_id_str)
         return
     try:
-        asyncio.run(execute_site_audit(site_id_str, triggered_by="cron"))
+        asyncio.run(execute_site_audit(site_id_str, triggered_by="cron", scope=SCHEDULED_SCOPE))
     except Exception as exc:
         logger.error("Error running scheduled audit for site %s: %s", site_id_str, exc)
 
 
 def _dispatch_from_thread(site_id_str: str) -> None:
     try:
-        dispatch_audit(site_id_str, "cron", "quick")
+        dispatch_audit(site_id_str, "cron", SCHEDULED_SCOPE)
     except Exception as exc:
         logger.error("Could not queue scheduled audit for site %s: %s", site_id_str, exc)
 
@@ -467,7 +518,10 @@ async def execute_site_audit(
                     logger.info("Site crawl for %s (scope=%s) fell back to homepage only: %s",
                                 site.url, scope, crawl.crawl_error)
                 crawl_stats = {"pages": len(crawl.pages), "posts": len(crawl.posts), "other": len(crawl.other),
-                               "targets": len(crawl.target_urls), "error": crawl.crawl_error}
+                               "targets": len(crawl.target_urls), "error": crawl.crawl_error, "scope": scope,
+                               # Every URL the sitemap listed (not just the ones scanned), so the next run can
+                               # tell "page deleted from the site" from "page not in this run's scan set".
+                               "sitemap_urls": [u.rstrip("/") for u in (crawl.pages + crawl.posts + crawl.other)][:1500]}
                 logger.info("Scope %s for %s: %d target page(s) (%d pages, %d posts discovered)",
                             scope, site.url, len(crawl.target_urls), len(crawl.pages), len(crawl.posts))
 
@@ -577,11 +631,16 @@ async def execute_site_audit(
                 raise
             except Exception as exc:
                 logger.warning("Urgent-finding confirmation failed on %s (keeping all): %s", site.url, exc)
-            reconciled = reconcile_findings(db, site, audit_run, specs, measured)
+            prev_inventory = (previous_run.brief or {}).get("inventory") if previous_run else None
+            reconciled = reconcile_findings(
+                db, site, audit_run, specs, measured,
+                scanned_urls=set(page_statuses) if needs_pages else None,
+                prev_scanned_urls=set((prev_inventory or {}).get("pages") or {}) if prev_inventory else None,
+                page_modules={m for m, cfg in AUDIT_MODULES.items() if cfg["needs_pages"]},
+            )
             reconciled["unconfirmed"] = unconfirmed
             page_inventory = {u: _page_facts(u, shared_pages.get(u)) for u in page_statuses} if needs_pages else {}
             inventory = build_inventory(site, results_dicts, page_inventory, crawl_stats)
-            prev_inventory = (previous_run.brief or {}).get("inventory") if previous_run else None
             changes = diff_inventory(prev_inventory, inventory, site.url) if not is_partial else []
             if not is_partial:
                 try:

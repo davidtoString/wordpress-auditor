@@ -64,7 +64,7 @@ export const EditSitePage: React.FC = () => {
     <SiteForm
       initialValues={site}
       title={`Edit Site: ${site.name}`}
-      subtitle="Update domain settings, scheduling cron expressions, authentication, or NAP data."
+      subtitle="Update domain settings, the full-audit schedule, authentication, or NAP data."
       onSubmit={async (values) => {
         await updateMutation.mutateAsync(values)
       }}

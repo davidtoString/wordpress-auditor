@@ -19,6 +19,7 @@ import {
 import { settings as settingsApi } from '../lib/api'
 import type { Settings, GoogleTestResult } from '../lib/types'
 import { formatDate } from '../lib/utils'
+import { describeCron } from '../lib/cron'
 import toast from 'react-hot-toast'
 
 export const SettingsPage: React.FC = () => {
@@ -565,10 +566,10 @@ export const SettingsPage: React.FC = () => {
             </div>
             <div>
               <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-                Automated Cron Scheduler Jobs
+                Scheduled Audits
               </h3>
               <p className="text-xs text-slate-400">
-                Background APScheduler recurring jobs scheduled across your WordPress sites.
+                Every scheduled run is a full audit (all sitemap URLs, Lighthouse on up to 60). Times are Mexico City.
               </p>
             </div>
           </div>
@@ -595,7 +596,7 @@ export const SettingsPage: React.FC = () => {
             ) : (
               <Play className="w-3.5 h-3.5 fill-current" />
             )}
-            Run All Audits Now
+            Run Full Audits on All Sites
           </button>
           </div>
         </div>
@@ -615,7 +616,7 @@ export const SettingsPage: React.FC = () => {
                 <tr className="border-b border-slate-200 dark:border-slate-700 text-slate-400 font-semibold uppercase">
                   <th className="py-2.5 px-3">Job Name</th>
                   <th className="py-2.5 px-3">Site Target</th>
-                  <th className="py-2.5 px-3">Cron Schedule</th>
+                  <th className="py-2.5 px-3">Schedule</th>
                   <th className="py-2.5 px-3">Next Execution</th>
                   <th className="py-2.5 px-3 text-right">Status</th>
                 </tr>
@@ -624,13 +625,13 @@ export const SettingsPage: React.FC = () => {
                 {jobsList.map((job) => (
                   <tr key={job.id} className="hover:bg-slate-50 dark:hover:bg-slate-750">
                     <td className="py-3 px-3 font-semibold text-slate-800 dark:text-slate-200">
-                      {job.name || job.id}
+                      {job.site_id ? `Full audit${job.scope && job.scope !== 'full' ? ` (${job.scope})` : ''}` : job.name || job.id}
                     </td>
                     <td className="py-3 px-3 text-slate-600 dark:text-slate-400">
                       {job.site_name || job.site_id || 'System Job'}
                     </td>
-                    <td className="py-3 px-3 font-mono text-brand-600 dark:text-brand-400">
-                      {job.cron_expression}
+                    <td className="py-3 px-3 text-brand-600 dark:text-brand-400" title={job.cron_expression}>
+                      {job.site_id ? describeCron(job.cron_expression) : job.cron_expression}
                     </td>
                     <td className="py-3 px-3 font-mono text-slate-500">
                       {job.next_run_time ? formatDate(job.next_run_time) : 'Pending next cycle'}

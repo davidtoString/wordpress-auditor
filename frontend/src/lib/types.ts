@@ -258,6 +258,7 @@ export interface SchedulerJob {
   site_id?: string
   site_name?: string
   cron_expression: string
+  scope?: string | null
   next_run_time?: string | null
   is_paused?: boolean
 }

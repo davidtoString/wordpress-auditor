@@ -565,12 +565,47 @@ def diff_inventory(prev: dict[str, Any] | None, cur: dict[str, Any], site_url: s
     def ch(kind: str, severity: str, title: str, **detail: Any) -> None:
         changes.append({"kind": kind, "severity": severity, "title": title, "detail": detail})
 
-    # Pages (the sampled target set)
+    # Pages (the scanned target set). The scan set depends on the run's scope (quick = homepage +
+    # 20 pages, full = everything), so a page entering or leaving it is only news when the sitemap
+    # itself changed. Runs before 2026-11-08 did not store the sitemap list; for those the old
+    # "scan set" wording is kept.
     pp, cp = prev.get("pages") or {}, cur.get("pages") or {}
-    for url in sorted(set(cp) - set(pp)):
-        ch("page_added", "info", f"New page in scan set: {_path(url, site_url)}", url=url)
-    for url in sorted(set(pp) - set(cp)):
-        ch("page_removed", "medium", f"Page no longer in sitemap/scan set: {_path(url, site_url)}", url=url)
+    prev_sitemap = (prev.get("crawl") or {}).get("sitemap_urls")
+    cur_sitemap = (cur.get("crawl") or {}).get("sitemap_urls")
+    prev_set = set(prev_sitemap) if prev_sitemap is not None else None
+    cur_set = set(cur_sitemap) if cur_sitemap is not None else None
+    prev_scope, cur_scope = (prev.get("crawl") or {}).get("scope"), (cur.get("crawl") or {}).get("scope")
+
+    added = sorted(set(cp) - set(pp))
+    published = [u for u in added if prev_set is None or u.rstrip("/") not in prev_set]
+    only_scanned = [u for u in added if prev_set is not None and u.rstrip("/") in prev_set]
+    if len(published) > 10:
+        where = "in the sitemap" if prev_set is not None else "in scan set (first run storing the sitemap list)"
+        ch("pages_added", "info", f"{len(published)} new pages {where} (first: {_path(published[0], site_url)})",
+           urls=published[:50], count=len(published))
+    else:
+        for url in published:
+            label = "New page in sitemap" if prev_set is not None else "New page in scan set"
+            ch("page_added", "info", f"{label}: {_path(url, site_url)}", url=url)
+    if only_scanned:
+        why = f" (scope {cur_scope} vs {prev_scope})" if cur_scope and prev_scope and cur_scope != prev_scope else ""
+        ch("scan_set_wider", "info", f"{len(only_scanned)} existing pages scanned this run that the last run skipped{why}",
+           count=len(only_scanned))
+
+    removed = sorted(set(pp) - set(cp))
+    gone = [u for u in removed if cur_set is None or u.rstrip("/") not in cur_set]
+    only_unscanned = [u for u in removed if cur_set is not None and u.rstrip("/") in cur_set]
+    if len(gone) > 10:
+        ch("pages_removed", "medium", f"{len(gone)} pages no longer in the sitemap (first: {_path(gone[0], site_url)})",
+           urls=gone[:50], count=len(gone))
+    else:
+        for url in gone:
+            label = "Page no longer in sitemap" if cur_set is not None else "Page no longer in sitemap/scan set"
+            ch("page_removed", "medium", f"{label}: {_path(url, site_url)}", url=url)
+    if only_unscanned:
+        why = f" (scope {cur_scope} vs {prev_scope})" if cur_scope and prev_scope and cur_scope != prev_scope else ""
+        ch("scan_set_narrower", "info", f"{len(only_unscanned)} pages still in the sitemap were not scanned this run{why}",
+           count=len(only_unscanned))
     for url in sorted(set(cp) & set(pp)):
         a, b = pp[url], cp[url]
         if a.get("status") != b.get("status") and (a.get("status") or 0) < 400 <= (b.get("status") or 0):
@@ -641,9 +676,16 @@ def diff_inventory(prev: dict[str, Any] | None, cur: dict[str, Any], site_url: s
             elif a is False and b is True:
                 ch("indexed", "info", f"Google indexed {_path(u, site_url)}", url=u)
 
+    # Collections aggregated over the scanned pages (tags, runtime scripts, schema types) can
+    # only shrink for real when this run scanned at least the pages the previous run did.
+    narrower = bool(only_unscanned)
+
     # Tracking and third parties
     pt, ct = set(prev.get("tracking_ids") or []), set(cur.get("tracking_ids") or [])
     for t in sorted(pt - ct):
+        if narrower:
+            ch("tracking_unverified", "info", f"Tracking tag {t} not seen on the pages scanned this run (seen last run on unscanned pages?)", tag=t)
+            continue
         ch("tracking_removed", "high", f"Tracking tag no longer found: {t}", tag=t)
     for t in sorted(ct - pt):
         ch("tracking_added", "info", f"New tracking tag: {t}", tag=t)
@@ -652,13 +694,16 @@ def diff_inventory(prev: dict[str, Any] | None, cur: dict[str, Any], site_url: s
         for e in sorted(ce - pe):
             ch("third_party_added", "low", f"New third-party script at runtime: {e}", entity=e)
         for e in sorted(pe - ce):
-            ch("third_party_removed", "info", f"Third-party script gone: {e}", entity=e)
+            if not narrower:
+                ch("third_party_removed", "info", f"Third-party script gone: {e}", entity=e)
 
     ps, cs = set(prev.get("schema_types") or []), set(cur.get("schema_types") or [])
     if ps and not cs:
         ch("schema_gone", "high", "All structured data disappeared")
     else:
         for t in sorted(ps - cs):
+            if narrower:
+                continue
             ch("schema_type_removed", "low", f"Schema type no longer present: {t}", type=t)
         for t in sorted(cs - ps):
             ch("schema_type_added", "info", f"New schema type: {t}", type=t)
@@ -720,11 +765,25 @@ def reconcile_findings(
     run: AuditRun,
     specs: list[FindingSpec],
     modules_measured: set[str],
+    scanned_urls: set[str] | None = None,
+    prev_scanned_urls: set[str] | None = None,
+    page_modules: set[str] | None = None,
 ) -> dict[str, Any]:
     """Upsert this run's findings and resolve open ones that were not seen again. A finding is
     only resolved when its module actually produced a measurement this run, so a timed-out
-    module does not silently 'fix' everything it reported last time."""
+    module does not silently 'fix' everything it reported last time.
+
+    Scan-set rule: a finding about a specific URL is only resolved when that URL was scanned
+    this run, and a page-aggregated finding without a URL (duplicate titles, console errors,
+    orphan pages) is only resolved when this run scanned at least every page the previous run
+    did. Otherwise a quick manual run after a full scheduled run would "resolve" everything it
+    did not look at, and the next full run would report it all as new again."""
     now = datetime.now(timezone.utc).replace(tzinfo=None)
+    norm = lambda u: (u or "").rstrip("/")
+    scanned_norm = {norm(u) for u in scanned_urls} if scanned_urls is not None else None
+    scan_set_shrank = (scanned_norm is not None and prev_scanned_urls is not None
+                       and not {norm(u) for u in prev_scanned_urls} <= scanned_norm)
+    page_modules = page_modules or set()
     open_rows = {f.fingerprint: f for f in db.query(Finding).filter(Finding.site_id == site.id, Finding.status == "open").all()}
     seen: set[str] = set()
     new_items: list[dict[str, Any]] = []
@@ -774,11 +833,20 @@ def reconcile_findings(
         (new_items if is_new else persisting).append(item)
 
     resolved: list[dict[str, Any]] = []
+    held_open: list[dict[str, Any]] = []
     for fp, row in open_rows.items():
         if fp in seen:
             continue
         if row.module not in modules_measured and row.module != "crawl":
             continue
+        is_page_module = row.module in page_modules or row.module == "crawl"
+        if is_page_module and scanned_norm is not None:
+            if row.url and norm(row.url) not in scanned_norm:
+                held_open.append({"type": row.type, "title": row.title, "url": row.url, "reason": "page not scanned"})
+                continue
+            if not row.url and scan_set_shrank:
+                held_open.append({"type": row.type, "title": row.title, "url": None, "reason": "scan set smaller than last run"})
+                continue
         row.status = "resolved"
         row.resolved_at = now
         row.resolved_run_id = run.id
@@ -787,7 +855,7 @@ def reconcile_findings(
                          "was_muted": bool(row.mute_kind)})
 
     db.flush()
-    return {"new": new_items, "persisting": persisting, "resolved": resolved}
+    return {"new": new_items, "persisting": persisting, "resolved": resolved, "held_open": held_open}
 
 
 # ============================================================================ brief
@@ -825,6 +893,10 @@ def build_brief(
         det = r.get("details") or {}
         if r.get("status") == "error" or (isinstance(det, dict) and det.get("not_measured")):
             notes.append(f"{r['module']}: {r.get('summary') or 'not measured'}")
+    held = reconciled.get("held_open") or []
+    if held:
+        notes.append(f"{len(held)} open finding(s) are on pages this {run.scope} run did not scan; "
+                     f"they stay open unchanged until the next full run checks them.")
 
     first_run = previous_run is None
     return {

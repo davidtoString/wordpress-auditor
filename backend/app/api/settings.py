@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timezone
 from typing import Any, List, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
@@ -12,7 +13,7 @@ from app.database import get_db
 from app.auditors import google_sc
 from app.email.resend_client import send_test_email
 from app.models import AppSetting, Site, User
-from app.scheduler import dispatch_audit, scheduler
+from app.scheduler import SCHEDULED_SCOPE, dispatch_audit, scheduler
 from app.uptime import run_uptime_probe
 
 logger = logging.getLogger(__name__)
@@ -166,16 +167,25 @@ async def trigger_test_email(
 
 
 @router.get("/scheduler/jobs")
-def get_scheduled_jobs():
-    """List all registered background cron jobs."""
+def get_scheduled_jobs(db: Session = Depends(get_db)):
+    """List all registered background jobs. Site audit jobs carry the site's cron expression
+    (as stored, standard cron numbering) and name; system jobs describe their trigger."""
+    sites = {str(s.id): s for s in db.query(Site).all()}
     jobs = []
     for j in scheduler.get_jobs():
+        site = sites.get(j.id.removeprefix("audit_site_")) if j.id.startswith("audit_site_") else None
+        next_run = j.next_run_time
         jobs.append({
             "id": j.id,
             "name": j.name,
-            "next_run_time": j.next_run_time.isoformat() if j.next_run_time else None,
-            "trigger": str(j.trigger),
+            "site_id": str(site.id) if site else None,
+            "site_name": site.name if site else None,
+            "scope": SCHEDULED_SCOPE if site else None,
+            "cron_expression": site.cron_schedule if site else str(j.trigger),
+            "next_run_time": next_run.astimezone(timezone.utc).replace(tzinfo=None).isoformat() if next_run else None,
+            "is_paused": next_run is None,
         })
+    jobs.sort(key=lambda x: (x["site_name"] is None, x["next_run_time"] or "9"))
     return jobs
 
 
@@ -183,14 +193,15 @@ def get_scheduled_jobs():
 def run_all_audits(
     db: Session = Depends(get_db),
 ):
-    """Queue an audit for every active site. Runs execute one at a time through the shared
-    audit queue (previously they all started simultaneously and corrupted each other's results)."""
+    """Queue a full-scope audit for every active site, the same run the cron schedule performs.
+    Runs execute one at a time through the shared audit queue (previously they all started
+    simultaneously and corrupted each other's results)."""
     active_sites = db.query(Site).filter(Site.is_active == True).all()
     for site in active_sites:
-        dispatch_audit(str(site.id), "manual", "quick")
+        dispatch_audit(str(site.id), "manual", SCHEDULED_SCOPE)
 
     return {
-        "message": f"Queued audits for {len(active_sites)} active sites (they run one at a time)",
+        "message": f"Queued full audits for {len(active_sites)} active sites (they run one at a time)",
         "count": len(active_sites),
     }
 
