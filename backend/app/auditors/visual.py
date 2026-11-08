@@ -1,13 +1,17 @@
-"""Visual check: does the page *look* broken?
+"""Visual inspection: does the page *look* broken?
 
-Lighthouse already saves a full-page screenshot of every audited route. This step compares
-each with the previous run's screenshot (pixel diff) and asks a vision model to judge the
-homepage, the contact page, and any page that changed noticeably: overlapping or cut-off
-elements, missing hero/images, placeholder or error text, unstyled content, a modal covering
-the page, a form with no submit button. Deterministic signals (404 assets, console errors)
-are handled in the Lighthouse module; this covers what only a pair of eyes would catch.
+Deterministic checks (404 assets, console errors, Lighthouse) cannot see an empty "Client
+Reviews" section or a card grid whose titles vanished after a plugin update. This module
+opens each audited page in a real browser (Playwright Chromium, already in the image) at a
+desktop and a mobile width, scrolls through it so lazy-loaded images and scroll animations
+have fired, takes a full-page screenshot of each, compares them pixel-wise with the previous
+run, and has a vision model review the page section by section.
 
-Runs after the Lighthouse module, not concurrently with it. Score None (informational).
+Which pages get the (paid) vision review each run is governed by a budget: the homepage and
+contact page always, pages flagged broken last time (so the finding can resolve), pages that
+changed visibly, pages never reviewed, then the least-recently reviewed pages. Flagged sections
+are saved as separate images so the UI can show exactly what the model saw. Score None
+(informational); findings come from `verdict.broken`.
 """
 from __future__ import annotations
 
@@ -16,178 +20,487 @@ import base64
 import io
 import json
 import logging
+import re
+import shutil
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 from app.auditors.base import AuditModuleResult
-from app.auditors.unlighthouse import HISTORY_DIR
+from app.auditors.unlighthouse import REPORTS_BASE_DIR, _safe_domain
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-DIFF_WIDTH = 600          # compare at this width; screenshots are ~412px mobile already
-DIFF_MAX_HEIGHT = 2400    # compare the top of the page only; long pages vary at the bottom
-CHANGED_THRESHOLD = 0.12  # share of differing pixels that counts as "changed"
-VISION_MAX_PAGES = 4
+VIEWPORTS = {
+    "desktop": {"width": 1366, "height": 850, "mobile": False},
+    "mobile": {"width": 390, "height": 844, "mobile": True},
+}
+CAPTURE_CONCURRENCY = 3
+PAGE_TIMEOUT_MS = 45000
+MODULE_TIME_BUDGET_S = 40 * 60
+CHANGED_THRESHOLD = 0.20       # share of differing pixels that counts as "changed" (sliders/animations move ~0.1-0.25)
+PIXEL_TOLERANCE = 40           # per-channel difference below this is "same" (JPEG noise, antialiasing)
+TILE_HEIGHT = {"desktop": 1400, "mobile": 2000}
+TILE_SCALE = {"desktop": 0.6, "mobile": 1.0}   # desktop tiles sent at 820px wide; mobile at 390px
+MONTAGE_COLUMNS = {"desktop": 1, "mobile": 2}  # two mobile strips per request, side by side
+MIN_TILE_HEIGHT = 250
 VISION_MODEL = "gpt-4o"
+BROKEN_CONFIDENCE = 0.7
 
 _VISION_PROMPT = (
-    "You are checking a screenshot of a small-business website page (heating, plumbing, home "
-    "services) for rendering problems. Decide whether the page looks BROKEN to a visitor. Broken "
-    "means: overlapping or cut-off text or elements, large empty areas where content should be, "
-    "missing or broken images (alt text / broken-image icons), unstyled HTML (default fonts, blue "
-    "links, no layout), raw template code or placeholder text (lorem ipsum, {{variables}}, "
-    "shortcodes like [contact-form]), PHP/JS error text, a hero section with no content, a form "
-    "without a visible submit button, or a modal/banner covering most of the page. NOT broken: "
-    "a normal cookie or promo banner, a chat bubble, a sticky call button, long pages, design "
-    "choices you dislike. Be conservative: only flag what you can actually see.\n"
-    "Respond with JSON only: {\"broken\": bool, \"confidence\": 0-1, "
-    "\"issues\": [{\"type\": str, \"description\": str, \"location\": str}], \"summary\": str}."
+    "You are a QA reviewer checking one section of a full-page screenshot of a small-business website "
+    "(heating, plumbing, home services). The screenshot was taken after the page fully loaded and was "
+    "scrolled through, so lazy-loaded content had time to appear. Decide if anything in THIS section "
+    "looks BROKEN to a visitor.\n"
+    "Broken means: a section heading with nothing under it (empty area where content clearly should be, "
+    "e.g. 'Reviews' or 'Our services' with no items); card or grid layouts where cards have icons or boxes "
+    "but missing titles or text; overlapping or cut-off text; misaligned or collapsed columns; stretched, "
+    "missing or broken images (broken-image icons, alt text showing); unstyled HTML (default fonts, blue "
+    "underlined links, no layout); raw shortcodes or template code such as [gallery] or {{variable}}; lorem "
+    "ipsum; PHP, JavaScript or database error text; a form without a visible submit button; a modal or "
+    "banner covering most of the content.\n"
+    "NOT broken: normal whitespace between sections; design choices you dislike; a cookie, chat, promo or "
+    "call button; the small reCAPTCHA badge, a sticky header, a floating button or chat bubble drawn over "
+    "content (full-page captures paint fixed elements over the page once); minor typography such as "
+    "spacing, punctuation or hyphenation; content cropped at the very top or bottom edge of this section "
+    "(it continues in the next section); a map or video embed showing a placeholder; a single decorative "
+    "element; an image or background still loading.\n"
+    "Be precise and conservative: only flag what you can actually see, and describe it so a developer can "
+    "find it (quote nearby headings). Respond with JSON only: {\"broken\": bool, \"confidence\": 0-1, "
+    "\"issues\": [{\"type\": str, \"description\": str, \"location\": str}], \"summary\": str}"
 )
 
+_DISMISS_SELECTORS = [
+    "#onetrust-accept-btn-handler", ".cky-btn-accept", "#cookie_action_close_header",
+    ".cmplz-accept", "#cn-accept-cookie", ".cc-btn.cc-dismiss", "button[aria-label='Accept cookies']",
+]
 
-def _load_image(path: Path):
-    from PIL import Image
-    img = Image.open(path).convert("RGB")
-    if img.width != DIFF_WIDTH:
-        ratio = DIFF_WIDTH / img.width
-        img = img.resize((DIFF_WIDTH, max(1, int(img.height * ratio))))
-    if img.height > DIFF_MAX_HEIGHT:
-        img = img.crop((0, 0, DIFF_WIDTH, DIFF_MAX_HEIGHT))
-    return img
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def _slug(path: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9._-]+", "_", path.strip("/")) or "home"
+    return s[:120]
+
+
+def _visual_dir(site_url: str) -> Path:
+    return REPORTS_BASE_DIR / _safe_domain(site_url) / "visual"
+
+
+def _url_for(site_url: str, rel: Path) -> str:
+    return f"/reports/{_safe_domain(site_url)}/visual/{rel.as_posix()}"
+
+
+# ----------------------------------------------------------------------------- capture
+
+async def _scroll_through(page) -> None:
+    height = await page.evaluate("document.body.scrollHeight")
+    y, steps = 0, 0
+    while y < height and steps < 60:
+        y += 600
+        steps += 1
+        await page.evaluate(f"window.scrollTo(0, {y})")
+        await page.wait_for_timeout(250)
+        height = await page.evaluate("document.body.scrollHeight")
+    await page.evaluate("window.scrollTo(0, 0)")
+    await page.wait_for_timeout(900)
+
+
+async def _dismiss_banners(page) -> None:
+    for sel in _DISMISS_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                await el.click(timeout=1500)
+                await page.wait_for_timeout(300)
+                return
+        except Exception:
+            continue
+
+
+async def _capture_page(browser, url: str, out_dir: Path, device: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Desktop + mobile full-page screenshots of one URL after scrolling through it."""
+    out: dict[str, Any] = {"url": url, "shots": {}, "error": None, "status": None}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, vp in VIEWPORTS.items():
+        ctx = None
+        try:
+            # The browser's own identity: a spoofed desktop Chrome UA with mismatched client hints
+            # gets a WAF 403 on some hosts, while Playwright's defaults and device descriptors pass.
+            if vp["mobile"] and device:
+                ctx = await browser.new_context(**device, ignore_https_errors=True)
+            else:
+                ctx = await browser.new_context(
+                    viewport={"width": vp["width"], "height": vp["height"]}, device_scale_factor=1,
+                    is_mobile=vp["mobile"], has_touch=vp["mobile"], ignore_https_errors=True,
+                )
+            page = await ctx.new_page()
+            try:
+                resp = await page.goto(url, wait_until="networkidle", timeout=PAGE_TIMEOUT_MS)
+            except Exception:
+                resp = await page.goto(url, wait_until="load", timeout=PAGE_TIMEOUT_MS)
+            out["status"] = resp.status if resp else None
+            if resp is not None and resp.status >= 400:
+                # A block page (403 from a WAF) or an error page is not the site; do not judge it.
+                out["error"] = f"HTTP {resp.status}" + (" (blocked)" if resp.status in (401, 403, 429) else "")
+                break
+            await _dismiss_banners(page)
+            # The reCAPTCHA badge is a fixed element that full-page captures paint over content;
+            # it is not part of the page and only produces false "white box overlapping" reports.
+            try:
+                await page.add_style_tag(content=".grecaptcha-badge{visibility:hidden !important}")
+            except Exception:
+                pass
+            await _scroll_through(page)
+            path = out_dir / f"{name}.jpeg"
+            await page.screenshot(path=str(path), full_page=True, type="jpeg", quality=72)
+            height = await page.evaluate("document.body.scrollHeight")
+            out["shots"][name] = {"file": str(path), "height": height}
+        except Exception as exc:
+            out["error"] = f"{name}: {type(exc).__name__}: {str(exc)[:160]}"
+            logger.info("visual capture failed for %s (%s): %s", url, name, exc)
+        finally:
+            if ctx is not None:
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+    return out
+
+
+async def capture_all(site_url: str, paths: list[str], out_root: Path, deadline: float) -> dict[str, dict[str, Any]]:
+    from playwright.async_api import async_playwright
+
+    results: dict[str, dict[str, Any]] = {}
+    sem = asyncio.Semaphore(CAPTURE_CONCURRENCY)
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+        device = dict(pw.devices.get("Pixel 7") or {}) or None
+        try:
+            async def _one(path: str) -> None:
+                if time.monotonic() > deadline:
+                    results[path] = {"url": urljoin(site_url + "/", path.lstrip("/")), "shots": {}, "error": "skipped: time budget"}
+                    return
+                async with sem:
+                    url = urljoin(site_url + "/", path.lstrip("/"))
+                    results[path] = await _capture_page(browser, url, out_root / _slug(path), device)
+            await asyncio.gather(*[_one(p) for p in paths])
+        finally:
+            await browser.close()
+    return results
+
+
+# ----------------------------------------------------------------------------- diff
 
 def _diff_ratio(current: Path, previous: Path) -> tuple[float | None, int | None]:
-    """Share of differing pixels in the compared region, and the height difference in px."""
+    """Share of pixels that differ beyond PIXEL_TOLERANCE over the common height, and the
+    height difference in px. Compared at the current image's width."""
     try:
+        import numpy as np
         from PIL import Image
-        from pixelmatch.contrib.PIL import pixelmatch
-        a = _load_image(current)
-        b = _load_image(previous)
+        a = Image.open(current).convert("RGB")
+        b = Image.open(previous).convert("RGB")
+        if b.width != a.width:
+            b = b.resize((a.width, max(1, int(b.height * a.width / b.width))))
         height_delta = a.height - b.height
         h = min(a.height, b.height)
         if h < 50:
             return None, height_delta
-        a = a.crop((0, 0, DIFF_WIDTH, h))
-        b = b.crop((0, 0, DIFF_WIDTH, h))
-        out = Image.new("RGB", (DIFF_WIDTH, h))
-        mismatched = pixelmatch(a, b, out, threshold=0.15, includeAA=False)
-        return round(mismatched / float(DIFF_WIDTH * h), 4), height_delta
+        na = np.asarray(a.crop((0, 0, a.width, h)), dtype=np.int16)
+        nb = np.asarray(b.crop((0, 0, a.width, h)), dtype=np.int16)
+        differing = (np.abs(na - nb).max(axis=2) > PIXEL_TOLERANCE)
+        return round(float(differing.mean()), 4), height_delta
     except Exception as exc:
-        logger.debug("pixel diff failed for %s: %s", current, exc)
+        logger.warning("pixel diff failed for %s: %s", current, exc)
         return None, None
 
 
-def _jpeg_for_vision(path: Path) -> str | None:
-    try:
-        from PIL import Image
-        img = Image.open(path).convert("RGB")
-        if img.width > 800:
-            ratio = 800 / img.width
-            img = img.resize((800, max(1, int(img.height * ratio))))
-        if img.height > 2600:
-            img = img.crop((0, 0, img.width, 2600))
+# ----------------------------------------------------------------------------- vision
+
+def _tiles(path: Path, viewport: str) -> list[tuple[int, int, bytes]]:
+    """Split a full-page screenshot into (y_from, y_to, jpeg bytes) sections. Narrow mobile
+    captures are shown two consecutive strips side by side (left strip first, then right) so one
+    vision request covers twice the page height at the same cost."""
+    from PIL import Image
+    img = Image.open(path).convert("RGB")
+    th = TILE_HEIGHT[viewport]
+    scale = TILE_SCALE[viewport]
+    columns = MONTAGE_COLUMNS.get(viewport, 1)
+    strips: list[tuple[int, int, Image.Image]] = []
+    y = 0
+    while y < img.height:
+        y2 = min(img.height, y + th)
+        if y2 - y < MIN_TILE_HEIGHT and strips:
+            y0, _, _ = strips.pop()
+            strips.append((y0, y2, img.crop((0, y0, img.width, y2))))
+        else:
+            strips.append((y, y2, img.crop((0, y, img.width, y2))))
+        y = y2
+    out: list[tuple[int, int, bytes]] = []
+    for i in range(0, len(strips), columns):
+        group = strips[i:i + columns]
+        if len(group) == 1:
+            tile = group[0][2]
+        else:
+            gap = 24
+            w = sum(g[2].width for g in group) + gap * (len(group) - 1)
+            h = max(g[2].height for g in group)
+            tile = Image.new("RGB", (w, h), (235, 235, 235))
+            x = 0
+            for g in group:
+                tile.paste(g[2], (x, 0))
+                x += g[2].width + gap
+        if scale != 1.0:
+            tile = tile.resize((int(tile.width * scale), max(1, int(tile.height * scale))))
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=70)
-        return base64.b64encode(buf.getvalue()).decode("ascii")
-    except Exception as exc:
-        logger.debug("could not prepare screenshot %s: %s", path, exc)
-        return None
+        tile.save(buf, format="JPEG", quality=72)
+        out.append((group[0][0], group[-1][1], buf.getvalue()))
+    return out
 
 
-async def _vision_verdict(b64: str, page_url: str) -> dict[str, Any] | None:
-    """OpenAI vision call (the provider already configured for this app). Returns the parsed
-    verdict or None when no provider is configured / the call fails."""
-    if not settings.OPENAI_API_KEY:
-        return None
+async def _judge_tile(client, page_url: str, viewport: str, idx: int, total: int, jpeg: bytes) -> dict[str, Any] | None:
+    b64 = base64.b64encode(jpeg).decode("ascii")
     try:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         completion = await client.chat.completions.create(
-            model=VISION_MODEL,
-            temperature=0,
-            max_tokens=500,
-            response_format={"type": "json_object"},
+            model=VISION_MODEL, temperature=0, max_tokens=600, response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": _VISION_PROMPT},
                 {"role": "user", "content": [
-                    {"type": "text", "text": f"Page: {page_url}. Mobile full-page screenshot (top ~2600px)."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}},
+                    {"type": "text", "text": f"Page: {page_url}. Viewport: {viewport}. Section {idx + 1} of {total}."
+                                              + (" The image shows two consecutive strips of the page side by side: read the left strip first, then the right one; the right strip continues directly below the left." if viewport == "mobile" and MONTAGE_COLUMNS.get("mobile", 1) == 2 else "")},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}},
                 ]},
             ],
         )
-        text = completion.choices[0].message.content or "{}"
-        verdict = json.loads(text)
-        verdict["model"] = VISION_MODEL
+        verdict = json.loads(completion.choices[0].message.content or "{}")
+        usage = getattr(completion, "usage", None)
+        verdict["_tokens"] = (usage.prompt_tokens + usage.completion_tokens) if usage else None
         return verdict
     except Exception as exc:
-        logger.warning("vision check failed for %s: %s", page_url, exc)
+        logger.warning("vision check failed for %s %s #%d: %s", page_url, viewport, idx, exc)
         return None
 
 
-async def run_visual_check(site_url: str, lighthouse_details: dict[str, Any] | None) -> AuditModuleResult:
-    routes = (lighthouse_details or {}).get("routes") or []
-    safe_domain = (lighthouse_details or {}).get("_safe_domain")
-    if not routes or not safe_domain:
-        return AuditModuleResult(module="visual", score=None, status="error",
-                                 summary="Not run: no Lighthouse screenshots available this run.",
-                                 details={"not_measured": True})
+async def review_page(client, page: dict[str, Any], site_url: str, out_dir: Path, rel_dir: Path) -> dict[str, Any]:
+    """Judge every section of both viewports. Returns the page verdict with flagged sections
+    saved as images for the UI."""
+    issues: list[dict[str, Any]] = []
+    sections_total = sections_broken = 0
+    tokens = 0
+    confidences: list[float] = []
+    sem = asyncio.Semaphore(4)
 
-    prev_root = HISTORY_DIR / safe_domain / "previous"
-    pages: list[dict[str, Any]] = []
-    for r in routes:
-        shot = r.get("screenshot_file")
-        if not shot or not Path(shot).exists():
-            continue
-        cur = Path(shot)
-        rel = Path(r.get("path", "/").strip("/")) / "full-screenshot.jpeg"
-        prev = prev_root / rel
-        ratio, height_delta = (None, None)
-        if prev.exists():
-            ratio, height_delta = await asyncio.to_thread(_diff_ratio, cur, prev)
-        pages.append({
-            "path": r.get("path"), "url": r.get("url"), "screenshot_url": r.get("screenshot_url"),
-            "screenshot_file": shot, "diff_ratio": ratio, "height_delta_px": height_delta,
-            "changed": ratio is not None and ratio >= CHANGED_THRESHOLD,
-            "compared": prev.exists(),
-        })
+    async def _one(viewport: str, idx: int, total: int, y0: int, y1: int, jpeg: bytes) -> None:
+        nonlocal sections_total, sections_broken, tokens
+        async with sem:
+            v = await _judge_tile(client, page["url"], viewport, idx, total, jpeg)
+        if v is None:
+            return
+        sections_total += 1
+        tokens += v.get("_tokens") or 0
+        conf = float(v.get("confidence") or 0)
+        if v.get("broken") and conf >= BROKEN_CONFIDENCE:
+            sections_broken += 1
+            confidences.append(conf)
+            tile_file = out_dir / f"flag_{viewport}_{idx + 1}.jpeg"
+            tile_file.write_bytes(jpeg)
+            for i in (v.get("issues") or [])[:4]:
+                issues.append({
+                    "type": i.get("type"), "description": (i.get("description") or "")[:300],
+                    "location": (i.get("location") or "")[:120], "viewport": viewport,
+                    "section": f"{idx + 1}/{total}", "y_from": y0, "y_to": y1,
+                    "tile_url": _url_for(site_url, rel_dir / tile_file.name), "confidence": conf,
+                })
 
-    # Which pages get a vision review: homepage, a contact page, then the most-changed pages.
-    def _priority(p: dict[str, Any]) -> tuple:
+    jobs = []
+    for viewport, shot in (page.get("shots") or {}).items():
+        tiles = await asyncio.to_thread(_tiles, Path(shot["file"]), viewport)
+        for idx, (y0, y1, jpeg) in enumerate(tiles):
+            jobs.append(_one(viewport, idx, len(tiles), y0, y1, jpeg))
+    await asyncio.gather(*jobs)
+
+    broken = sections_broken > 0
+    if broken:
+        heads = []
+        for i in issues[:3]:
+            heads.append(f"{i['viewport']}: {i['description'][:110]}")
+        summary = f"{sections_broken} of {sections_total} sections look broken. " + " | ".join(heads)
+    else:
+        summary = f"All {sections_total} sections reviewed, nothing looked broken."
+    return {
+        "broken": broken, "confidence": max(confidences) if confidences else (0.9 if sections_total else 0.0),
+        "issues": issues, "summary": summary, "model": VISION_MODEL,
+        "sections_reviewed": sections_total, "sections_broken": sections_broken, "tokens": tokens,
+        "reviewed_at": _now_iso(),
+    }
+
+
+# ----------------------------------------------------------------------------- state
+
+def _load_state(vdir: Path) -> dict[str, Any]:
+    try:
+        return json.loads((vdir / "state.json").read_text())
+    except Exception:
+        return {"pages": {}}
+
+
+def _save_state(vdir: Path, state: dict[str, Any]) -> None:
+    try:
+        vdir.mkdir(parents=True, exist_ok=True)
+        (vdir / "state.json").write_text(json.dumps(state))
+    except Exception as exc:
+        logger.debug("could not save visual state: %s", exc)
+
+
+def _select_for_review(pages: list[dict[str, Any]], state: dict[str, Any], budget: int) -> list[dict[str, Any]]:
+    """Homepage and contact first, then pages flagged last time, changed pages, never-reviewed
+    pages, then least recently reviewed. Capped at `budget`."""
+    st = state.get("pages") or {}
+
+    def rank(p: dict[str, Any]) -> tuple:
         path = (p.get("path") or "").lower()
-        return (0 if path == "/" else 1 if "contact" in path else 2, -(p.get("diff_ratio") or 0))
-    candidates = sorted(pages, key=_priority)
-    review = [p for p in candidates if (p.get("path") == "/" or "contact" in (p.get("path") or "").lower() or p.get("changed"))][:VISION_MAX_PAGES]
+        s = st.get(p.get("path") or "", {})
+        tier = (0 if path == "/" else 1 if "contact" in path else 2 if s.get("last_broken") else
+                3 if p.get("changed") else 4 if not s.get("last_reviewed_at") else 5)
+        return (tier, -(p.get("diff_ratio") or 0), s.get("last_reviewed_at") or "")
 
-    vision_ran = 0
-    for p in review:
-        b64 = await asyncio.to_thread(_jpeg_for_vision, Path(p["screenshot_file"]))
-        if not b64:
-            continue
-        verdict = await _vision_verdict(b64, p["url"])
-        if verdict is not None:
-            vision_ran += 1
-            p["verdict"] = {k: verdict.get(k) for k in ("broken", "confidence", "issues", "summary", "model")}
+    ordered = sorted([p for p in pages if p.get("shots") and not p.get("error")], key=rank)
+    return ordered[: max(0, budget)]
 
+
+# ----------------------------------------------------------------------------- entry
+
+async def run_visual_check(site_url: str, target_paths: list[str] | None,
+                           lighthouse_details: dict[str, Any] | None = None) -> AuditModuleResult:
+    t0 = time.monotonic()
+    deadline = t0 + MODULE_TIME_BUDGET_S
+    site_url = site_url.rstrip("/")
+    paths = list(dict.fromkeys(target_paths or []))
+    if not paths and lighthouse_details:
+        paths = [r.get("path") or "/" for r in (lighthouse_details.get("routes") or [])]
+    if not paths:
+        paths = ["/"]
+    max_pages = int(getattr(settings, "VISUAL_MAX_PAGES", 60) or 60)
+    budget = int(getattr(settings, "VISUAL_VISION_PAGE_BUDGET", 25) or 0)
+    sampled = len(paths) > max_pages
+    paths = paths[:max_pages]
+
+    vdir = _visual_dir(site_url)
+    current, previous = vdir / "current", vdir / "previous"
+    try:
+        if current.exists():
+            if previous.exists():
+                shutil.rmtree(previous, ignore_errors=True)
+            current.rename(previous)
+    except Exception as exc:
+        logger.warning("could not rotate visual screenshots for %s: %s", site_url, exc)
+    current.mkdir(parents=True, exist_ok=True)
+
+    # 1. Capture
+    try:
+        captures = await capture_all(site_url, paths, current, deadline)
+    except Exception as exc:
+        logger.error("visual capture failed for %s: %s", site_url, exc, exc_info=True)
+        return AuditModuleResult(module="visual", score=None, status="error",
+                                 summary=f"Not run: browser capture failed ({type(exc).__name__}).",
+                                 details={"not_measured": True, "error": str(exc)[:300]})
+
+    # 2. Diff against the previous run
+    pages: list[dict[str, Any]] = []
+    for path in paths:
+        cap = captures.get(path) or {}
+        shots = cap.get("shots") or {}
+        rel_dir = Path("current") / _slug(path)
+        entry: dict[str, Any] = {
+            "path": path, "url": cap.get("url") or urljoin(site_url + "/", path.lstrip("/")),
+            "status": cap.get("status"), "error": cap.get("error"), "shots": shots,
+            "screenshot_url": _url_for(site_url, rel_dir / "desktop.jpeg") if "desktop" in shots else None,
+            "mobile_url": _url_for(site_url, rel_dir / "mobile.jpeg") if "mobile" in shots else None,
+            "diff_ratio": None, "height_delta_px": None, "changed": False, "compared": False,
+        }
+        ratios = []
+        for vp in shots:
+            prev_file = previous / _slug(path) / f"{vp}.jpeg"
+            if prev_file.exists():
+                ratio, hd = await asyncio.to_thread(_diff_ratio, Path(shots[vp]["file"]), prev_file)
+                if ratio is not None:
+                    ratios.append(ratio)
+                    entry["compared"] = True
+                    if vp == "desktop":
+                        entry["height_delta_px"] = hd
+        if ratios:
+            entry["diff_ratio"] = max(ratios)
+            entry["changed"] = entry["diff_ratio"] >= CHANGED_THRESHOLD
+        pages.append(entry)
+
+    # 3. Vision review within the budget
+    state = _load_state(vdir)
+    reviewed = 0
+    broken_pages: list[str] = []
+    tokens_total = 0
+    if settings.OPENAI_API_KEY and budget > 0:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        to_review = _select_for_review(pages, state, budget)
+        page_sem = asyncio.Semaphore(2)
+
+        async def _review(p: dict[str, Any]) -> None:
+            nonlocal reviewed, tokens_total
+            if time.monotonic() > deadline:
+                return
+            async with page_sem:
+                verdict = await review_page(client, p, site_url, current / _slug(p["path"]), Path("current") / _slug(p["path"]))
+            if verdict.get("sections_reviewed"):
+                p["verdict"] = verdict
+                reviewed += 1
+                tokens_total += verdict.get("tokens") or 0
+                state.setdefault("pages", {})[p["path"]] = {"last_reviewed_at": verdict["reviewed_at"],
+                                                           "last_broken": bool(verdict["broken"])}
+                if verdict["broken"]:
+                    broken_pages.append(p["path"])
+
+        await asyncio.gather(*[_review(p) for p in to_review])
+        _save_state(vdir, state)
     for p in pages:
-        p.pop("screenshot_file", None)
+        p.pop("shots", None)  # file paths are not for the API
 
-    broken = [p for p in pages if (p.get("verdict") or {}).get("broken")]
-    changed = [p for p in pages if p.get("changed")]
+    captured = sum(1 for p in pages if p.get("screenshot_url") and not p.get("error"))
+    blocked = [p["path"] for p in pages if p.get("status") in (401, 403, 429)]
     compared = sum(1 for p in pages if p.get("compared"))
-    status = "fail" if broken else ("warn" if changed else "pass")
-    bits = [f"{len(pages)} page screenshots"]
-    bits.append(f"{compared} compared with the previous run" if compared else "no previous run to compare")
-    if changed:
-        bits.append(f"{len(changed)} changed visibly: " + ", ".join(p['path'] for p in changed[:4]))
-    if vision_ran:
-        bits.append(f"{vision_ran} reviewed by vision model, {len(broken)} judged broken")
+    changed = [p["path"] for p in pages if p.get("changed")]
+    failed = [p["path"] for p in pages if p.get("error")]
+    bits = [f"{captured} page(s) captured at desktop and mobile widths after scrolling"]
+    if compared:
+        bits.append(f"{compared} compared with the previous run, {len(changed)} changed noticeably")
+    else:
+        bits.append("no previous screenshots to compare yet")
+    if reviewed:
+        bits.append(f"{reviewed} reviewed section by section by the vision model, {len(broken_pages)} judged broken")
     elif not settings.OPENAI_API_KEY:
-        bits.append("vision review skipped (no AI key configured)")
-    summary = "; ".join(bits) + "."
+        bits.append("vision review skipped (no OpenAI key configured)")
+    elif budget <= 0:
+        bits.append("vision review disabled (budget 0)")
+    if blocked:
+        bits.append(f"{len(blocked)} page(s) blocked the browser (HTTP {pages[[p['path'] for p in pages].index(blocked[0])]['status']}); allowlist the server IP or the audit user agent")
+    elif failed:
+        bits.append(f"{len(failed)} page(s) could not be captured")
+    if sampled:
+        bits.append(f"first {max_pages} pages only")
+    status = "fail" if broken_pages else ("warn" if (changed or blocked or (failed and not captured)) else "pass")
+    if not captured:
+        return AuditModuleResult(module="visual", score=None, status="error",
+                                 summary="Not measured: " + "; ".join(bits) + ".",
+                                 details={"not_measured": True, "pages": pages, "failed_pages": failed, "blocked_pages": blocked})
     return AuditModuleResult(
-        module="visual", score=None, status=status, summary=summary,
-        details={"pages": pages, "changed_pages": [p["path"] for p in changed],
-                 "broken_pages": [p["path"] for p in broken], "vision_reviewed": vision_ran,
-                 "informational": True, "threshold": CHANGED_THRESHOLD},
+        module="visual", score=None, status=status, summary="; ".join(bits) + ".",
+        details={"pages": pages, "captured": captured, "compared": compared, "changed_pages": changed,
+                 "broken_pages": broken_pages, "blocked_pages": blocked, "vision_reviewed": reviewed, "vision_budget": budget,
+                 "vision_tokens": tokens_total, "failed_pages": failed, "informational": True,
+                 "threshold": CHANGED_THRESHOLD, "duration_s": round(time.monotonic() - t0),
+                 "viewports": {k: f"{v['width']}px" for k, v in VIEWPORTS.items()}},
     )

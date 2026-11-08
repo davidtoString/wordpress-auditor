@@ -89,7 +89,7 @@ const MODULE_HELP: Record<string, { what: string; howToFix: string }> = {
   },
   visual: {
     what: 'Compares each page\'s full-page screenshot with the previous run and has a vision model review the homepage, the contact page and any page that changed noticeably, looking for broken layout, missing images, placeholder or error text, unstyled content or a modal covering the page.',
-    howToFix: 'Open the screenshot linked on each flagged page and compare with the live site. A sudden visual change after a plugin or theme update is the usual cause; roll back or fix the template.',
+    howToFix: 'Open the flagged section image ("see section") and the desktop or mobile screenshot, then compare with the live site. Empty sections and cards without text usually mean a widget, shortcode or dynamic content source stopped working after an update.',
   },
   tracking_scripts: {
     what: 'Inventories every analytics, advertising pixel, call-tracking, heatmap, and chat-widget script loaded on the site — Google Analytics/Tag Manager, Meta Pixel, Google Ads, CallRail, Hotjar, etc. — and flags missing tracking, deprecated Universal Analytics, likely duplicate installs, and tracking present on some scanned pages but not others.',
@@ -328,7 +328,7 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
                 {pages.map((p, idx) => (
                   <div key={idx} className="flex items-start gap-2.5 text-[11px] bg-white dark:bg-slate-800/80 px-2.5 py-2 rounded border border-slate-200/50 dark:border-slate-700/50">
                     {p.screenshot_url ? (
-                      <a href={p.screenshot_url} target="_blank" rel="noopener noreferrer" className="shrink-0" title="Open full-page screenshot">
+                      <a href={p.screenshot_url} target="_blank" rel="noopener noreferrer" className="shrink-0" title="Open desktop full-page screenshot">
                         <img src={p.screenshot_url} alt="" className="w-10 h-16 object-cover object-top rounded border border-slate-200 dark:border-slate-700" loading="lazy" />
                       </a>
                     ) : (
@@ -357,10 +357,27 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
                       )}
                       {Array.isArray(p.verdict?.issues) && p.verdict.issues.length > 0 && (
                         <ul className="mt-0.5 list-disc list-inside text-rose-700 dark:text-rose-300">
-                          {p.verdict.issues.slice(0, 3).map((i: any, k: number) => (
-                            <li key={k}>{i.description}{i.location ? ` (${i.location})` : ''}</li>
+                          {p.verdict.issues.slice(0, 4).map((i: any, k: number) => (
+                            <li key={k}>
+                              {i.viewport ? <span className="uppercase text-[10px] font-semibold mr-1">{i.viewport}</span> : null}
+                              {i.description}{i.location ? ` (${i.location})` : ''}
+                              {i.tile_url ? (
+                                <>
+                                  {' '}
+                                  <a href={i.tile_url} target="_blank" rel="noopener noreferrer" className="underline text-rose-600 dark:text-rose-300">
+                                    see section
+                                  </a>
+                                </>
+                              ) : null}
+                            </li>
                           ))}
                         </ul>
+                      )}
+                      {(p.mobile_url || p.verdict?.sections_reviewed) && (
+                        <div className="mt-0.5 text-[10px] text-slate-400 flex gap-2">
+                          {p.mobile_url ? <a href={p.mobile_url} target="_blank" rel="noopener noreferrer" className="underline">mobile screenshot</a> : null}
+                          {p.verdict?.sections_reviewed ? <span>{p.verdict.sections_reviewed} sections reviewed</span> : null}
+                        </div>
                       )}
                     </div>
                   </div>

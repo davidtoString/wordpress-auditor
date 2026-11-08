@@ -436,10 +436,14 @@ def extract_findings(
     for p in vis.get("pages") or []:
         verdict = p.get("verdict") or {}
         if verdict.get("broken"):
+            issues = verdict.get("issues") or []
+            where = sorted({i.get("viewport") for i in issues if i.get("viewport")})
             add(type="visual_broken", severity="high", section="urgent", module="visual", url=p.get("url"),
-                title=f"Page looks broken: {p.get('path')} ({'; '.join(i.get('description', '')[:80] for i in (verdict.get('issues') or [])[:2])})",
-                detail={"issues": verdict.get("issues"), "screenshot_url": p.get("screenshot_url"),
-                        "confidence": verdict.get("confidence")})
+                title=f"Page looks broken{' on ' + '/'.join(where) if where else ''}: {p.get('path')} "
+                      f"({'; '.join(i.get('description', '')[:80] for i in issues[:2])})",
+                detail={"issues": issues, "screenshot_url": p.get("screenshot_url"), "mobile_url": p.get("mobile_url"),
+                        "flagged_sections": [i.get("tile_url") for i in issues if i.get("tile_url")][:6],
+                        "confidence": verdict.get("confidence"), "sections_reviewed": verdict.get("sections_reviewed")})
 
     sc = d("search_console")
     if sc and sc.get("configured"):

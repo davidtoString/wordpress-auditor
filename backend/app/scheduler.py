@@ -155,7 +155,7 @@ AUDIT_MODULES: dict[str, dict[str, Any]] = {
     "pagespeed": {"label": "PageSpeed Insights (homepage, Google)", "needs_pages": False},
     "search_console": {"label": "Google Search Console (index, clicks, sitemaps)", "needs_pages": False},
     "unlighthouse": {"label": "Lighthouse Performance (site-wide)", "needs_pages": True},
-    "visual": {"label": "Visual check (screenshots)", "needs_pages": True},
+    "visual": {"label": "Visual inspection (desktop + mobile screenshots, vision review)", "needs_pages": True},
     "availability": {"label": "Availability, TLS & email DNS", "needs_pages": False},
     "advertools": {"label": "Technical SEO (sitemap / robots / SERP)", "needs_pages": True},
     "seo": {"label": "On-page SEO", "needs_pages": True},
@@ -172,7 +172,7 @@ AUDIT_MODULES: dict[str, dict[str, Any]] = {
 }
 
 # Modules that are not run concurrently with the others because they consume another
-# module's output (visual needs Lighthouse's screenshots).
+# module's output (visual drives its own browser; it runs after Lighthouse to keep CPU free for it).
 _POST_MODULES = {"visual"}
 
 
@@ -462,8 +462,6 @@ async def execute_site_audit(
     selected_modules = normalize_modules(modules)
     active_modules = selected_modules or list(AUDIT_MODULES)
     is_partial = selected_modules is not None
-    if "visual" in active_modules and "unlighthouse" not in active_modules:
-        active_modules = [m for m in active_modules if m != "visual"]
 
     try:
         site = db.query(Site).filter(Site.id == site_uuid).first()
@@ -587,7 +585,8 @@ async def execute_site_audit(
             if "visual" in active_modules:
                 lh = next((r for r in results if r.module == "unlighthouse"), None)
                 try:
-                    results.append(await run_visual_check(site.url, lh.details if lh else None))
+                    # Runs after Lighthouse so the browser work does not skew its CPU-sensitive scores.
+                    results.append(await run_visual_check(site.url, target_paths, lh.details if lh else None))
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:

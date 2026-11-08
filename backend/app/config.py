@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     RESEND_FROM_EMAIL: str = "audits@yourdomain.com"
     RESEND_FROM_NAME: str = "WP Auditor"
     ALERT_EMAIL: str = ""
+    # Visual inspection: pages captured per run (desktop + mobile) and how many of them get the
+    # paid section-by-section vision review (~$0.03 per page with gpt-4o).
+    VISUAL_MAX_PAGES: int = 60
+    VISUAL_VISION_PAGE_BUDGET: int = 25
     FRONTEND_URL: str = "http://localhost:3000"
     DEBUG: bool = False
 
