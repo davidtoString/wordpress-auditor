@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { Clock } from 'lucide-react'
 import { DEFAULT_SCHEDULE, WEEKDAYS, buildCron, describeCron, parseCron, type SimpleSchedule } from '../lib/cron'
 import type { ScheduleScope } from '../lib/types'
+import { SCOPE_HINTS, SCOPE_LABELS } from '../lib/auditKinds'
 
 interface SchedulePickerProps {
   title: string
@@ -20,8 +21,8 @@ interface SchedulePickerProps {
 }
 
 const SCOPES: { value: ScheduleScope; label: string; hint: string }[] = [
-  { value: 'with_posts', label: 'All pages + recent posts', hint: 'Every WordPress Page in the sitemap plus the 10 most recently updated blog posts.' },
-  { value: 'full', label: 'Full website', hint: 'Every URL in the sitemap (pages, posts, other types), up to 500. Slow on large blogs.' },
+  { value: 'with_posts', label: SCOPE_LABELS.with_posts, hint: SCOPE_HINTS.with_posts },
+  { value: 'full', label: SCOPE_LABELS.full, hint: SCOPE_HINTS.full },
 ]
 
 export const SchedulePicker: React.FC<SchedulePickerProps> = ({

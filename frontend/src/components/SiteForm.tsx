@@ -172,8 +172,8 @@ export const SiteForm: React.FC<SiteFormProps> = ({
               <span className="normal-case font-normal text-slate-400">(Mexico City time)</span>
             </label>
             <SchedulePicker
-              title="Regular audit"
-              description="Performance, SEO, security, WordPress health, links, forms, tracking and Search Console. No screenshots. Weekly is the usual cadence."
+              title="Full audit"
+              description="Every page plus the 10 newest posts: performance, SEO, security, WordPress health, links, forms, redirects, schema, tracking and Search Console. No screenshots. Weekly is the usual cadence."
               cron={cronSchedule}
               onCronChange={setCronSchedule}
               enabled={isActive}
@@ -183,8 +183,8 @@ export const SiteForm: React.FC<SiteFormProps> = ({
               fallback={WEEKLY_MONDAY}
             />
             <SchedulePicker
-              title="Visual inspection audit"
-              description="Everything the regular audit does, plus desktop and mobile screenshots of every page reviewed section by section by the vision model. Slower and uses vision credits; monthly is the usual cadence."
+              title="Visual audit"
+              description="Everything the full audit does, plus desktop and mobile screenshots of every page and the newest post, reviewed section by section by the vision model. 40+ minutes and about 1 cent per page; monthly is the usual cadence."
               cron={visualCron}
               onCronChange={setVisualCron}
               enabled={isActive && visualEnabled}

@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import type { Audit } from '../lib/types'
 import { formatRelative, formatDate, moduleDisplayName } from '../lib/utils'
+import { describeRunKind, RUN_KIND_CLASSES, SCOPE_LABELS } from '../lib/auditKinds'
 import ScoreBadge from './ScoreBadge'
 
 interface AuditRunsTableProps {
@@ -187,6 +188,18 @@ export const AuditRunsTable: React.FC<AuditRunsTableProps> = ({
                 <td className="py-3.5 px-4">
                   <div className="flex flex-col gap-0.5">
                     {renderStatus(audit.status)}
+                    {(() => {
+                      const kind = describeRunKind(audit)
+                      if (kind.tone === 'partial') return null
+                      return (
+                        <span
+                          className={`inline-flex w-fit items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${RUN_KIND_CLASSES[kind.tone]}`}
+                          title={`${SCOPE_LABELS[audit.scope] || audit.scope}${kind.tone === 'visual' ? ' · with screenshots and vision review' : ' · no screenshots'}`}
+                        >
+                          {kind.label}
+                        </span>
+                      )
+                    })()}
                     {audit.modules && audit.modules.length > 0 && (
                       <span
                         className="inline-flex w-fit items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-50 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300"

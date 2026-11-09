@@ -18,6 +18,9 @@ import {
   Trash2,
   AlertCircle,
   SlidersHorizontal,
+  Zap,
+  ListChecks,
+  Camera,
 } from 'lucide-react'
 import Modal from '../components/ui/Modal'
 import {
@@ -40,6 +43,8 @@ import FindingsTable from '../components/FindingsTable'
 import UptimePanel from '../components/UptimePanel'
 import { formatDate, formatRelative } from '../lib/utils'
 import { describeCron } from '../lib/cron'
+import { AUDIT_KINDS, auditKindInfo, type AuditKind, type AuditKindInfo } from '../lib/auditKinds'
+import HoverTip from '../components/ui/Tooltip'
 
 const lower = (s: string) => s.replace(/^Daily/, 'daily').replace(/^Every/, 'every').replace(/^Weekdays/, 'weekdays').replace(/^Monthly/, 'monthly').replace(/^Custom/, 'custom')
 import toast from 'react-hot-toast'
@@ -50,8 +55,9 @@ export const SiteDetailPage: React.FC = () => {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const [historyPage, setHistoryPage] = useState(1)
-  const [auditScope, setAuditScope] = useState<AuditScope>('quick')
-  const [includeVisual, setIncludeVisual] = useState(false)
+  // Options for the next manual run: every sitemap URL instead of pages + recent posts.
+  const [everyUrl, setEveryUrl] = useState(false)
+  const [showOptions, setShowOptions] = useState(false)
   // Module subset for the next manual run. null = every module (the default, full audit).
   const [selectedModules, setSelectedModules] = useState<string[] | null>(null)
   const [showModulePicker, setShowModulePicker] = useState(false)
@@ -91,17 +97,16 @@ export const SiteDetailPage: React.FC = () => {
 
   // 4. Trigger Audit Mutation
   const triggerMutation = useMutation({
-    mutationFn: ({ scope, modules, includeVisual }: { scope: AuditScope; modules: string[] | null; includeVisual: boolean }) =>
+    mutationFn: ({ scope, modules, includeVisual }: { kind: AuditKind; scope: AuditScope; modules: string[] | null; includeVisual: boolean }) =>
       sitesApi.triggerAudit(id!, scope, modules, includeVisual),
-    onSuccess: (_data, { scope, modules, includeVisual }) => {
+    onSuccess: (_data, { kind, scope, modules }) => {
+      const label = auditKindInfo(kind).label
       toast.success(
         modules && modules.length > 0
-          ? `Partial audit started (${modules.length} module${modules.length === 1 ? '' : 's'}).`
+          ? `Partial ${label.toLowerCase()} started (${modules.length} module${modules.length === 1 ? '' : 's'}).`
           : scope === 'full'
-            ? `Full website audit started${includeVisual ? ' with visual inspection' : ''} — this can take a while, feel free to check back later.`
-            : includeVisual
-              ? 'Audit with visual inspection started.'
-              : 'Audit started (no visual inspection).'
+            ? `${label} started over every sitemap URL — this can take a while, check back later.`
+            : `${label} started.`
       )
       queryClient.invalidateQueries({ queryKey: ['site', id] })
       queryClient.invalidateQueries({ queryKey: ['site-history', id] })
@@ -144,11 +149,32 @@ export const SiteDetailPage: React.FC = () => {
     },
   })
 
-  const scopeOptions: { value: AuditScope; label: string; title: string }[] = [
-    { value: 'quick', label: 'Quick', title: 'Homepage + up to 20 pages: a fast spot check' },
-    { value: 'with_posts', label: 'Pages + posts', title: 'Every WordPress Page plus the 10 most recent blog posts (what the schedules run by default)' },
-    { value: 'full', label: 'Full website', title: 'Every URL in the sitemap, up to 500. Slow.' },
-  ]
+  const runKind = (kind: AuditKind) => {
+    const info = auditKindInfo(kind)
+    triggerMutation.mutate({
+      kind,
+      scope: everyUrl && kind !== 'quick' ? 'full' : info.scope,
+      modules: selectedModules,
+      includeVisual: info.includeVisual,
+    })
+  }
+  const pendingKind = triggerMutation.isPending ? triggerMutation.variables?.kind : undefined
+  const KIND_ICONS: Record<AuditKind, React.FC<{ className?: string }>> = { quick: Zap, full: ListChecks, visual: Camera }
+  const kindTip = (info: AuditKindInfo) => (
+    <>
+      <span className="block font-semibold text-slate-800 dark:text-slate-100 mb-1">{info.label}</span>
+      <span className="block">{info.summary}</span>
+      <span className="block mt-1">{info.checks}</span>
+      <span className="block mt-1 text-slate-500 dark:text-slate-400">{info.effort}</span>
+      <span className="block mt-1 italic">{info.when}</span>
+      {everyUrl && info.key !== 'quick' && (
+        <span className="block mt-1 text-amber-600 dark:text-amber-400">Option on: every URL in the sitemap instead of pages + 10 posts.</span>
+      )}
+      {isPartialSelection && (
+        <span className="block mt-1 text-violet-600 dark:text-violet-400">Option on: only the selected modules ({moduleButtonLabel}).</span>
+      )}
+    </>
+  )
 
   const allModuleNames = availableModules.map((m) => m.name)
   const isPartialSelection = selectedModules !== null && selectedModules.length < allModuleNames.length
@@ -257,11 +283,15 @@ export const SiteDetailPage: React.FC = () => {
             <span>&bull;</span>
             <span className="flex items-center gap-1">
               <Calendar className="w-3.5 h-3.5 text-slate-400" />
-              <span title={`regular: ${site.cron_schedule}${site.visual_cron_schedule ? ` · visual: ${site.visual_cron_schedule}` : ''} (Mexico City)`}>
+              <Link
+                to={`/sites/${id}/edit`}
+                className="hover:text-brand-600 hover:underline"
+                title={`Full audit: ${site.cron_schedule}${site.visual_cron_schedule ? ` · visual audit: ${site.visual_cron_schedule}` : ' · no visual schedule'} (Mexico City). Click to change the schedules.`}
+              >
                 {site.is_active === false
                   ? 'Manual only'
-                  : `Audit ${lower(describeCron(site.cron_schedule))}${site.visual_cron_schedule ? `, visual ${lower(describeCron(site.visual_cron_schedule))}` : ', no visual schedule'}`}
-              </span>
+                  : `Full audit ${lower(describeCron(site.cron_schedule))}${site.visual_cron_schedule ? `, visual audit ${lower(describeCron(site.visual_cron_schedule))}` : ', no visual schedule'}`}
+              </Link>
             </span>
             <span>&bull;</span>
             <span>Last Audit: {formatRelative(site.last_audit_at)}</span>
@@ -314,77 +344,75 @@ export const SiteDetailPage: React.FC = () => {
               </Link>
             )}
 
-            <div className="inline-flex rounded-xl border border-slate-200 dark:border-slate-700 p-0.5 bg-slate-50 dark:bg-slate-900/60">
-              {scopeOptions.map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  onClick={() => setAuditScope(opt.value)}
-                  title={opt.title}
-                  className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
-                    auditScope === opt.value
-                      ? 'bg-white dark:bg-slate-700 text-brand-600 dark:text-brand-400 shadow-sm'
-                      : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
+          </div>
 
-            <label
-              className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border cursor-pointer transition-colors ${
-                includeVisual
-                  ? 'border-brand-300 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/40 text-brand-700 dark:text-brand-300'
-                  : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 text-slate-600 dark:text-slate-300'
-              }`}
-              title="Also take desktop + mobile screenshots of every page and review them with the vision model (slower, uses vision credits)"
-            >
-              <input
-                type="checkbox"
-                checked={includeVisual}
-                onChange={(e) => setIncludeVisual(e.target.checked)}
-                className="w-3.5 h-3.5 rounded text-brand-600 focus:ring-brand-500 border-slate-300 dark:border-slate-600"
-              />
-              Visual inspection
-            </label>
-
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {AUDIT_KINDS.map((k) => {
+              const Icon = KIND_ICONS[k.key]
+              const busy = pendingKind === k.key
+              const style =
+                k.key === 'visual'
+                  ? 'text-white bg-fuchsia-600 hover:bg-fuchsia-700 shadow-md shadow-fuchsia-500/20'
+                  : k.key === 'full'
+                    ? 'text-white bg-brand-600 hover:bg-brand-700 shadow-md shadow-brand-500/20'
+                    : 'text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-700/70 hover:bg-slate-200 dark:hover:bg-slate-600'
+              return (
+                <HoverTip key={k.key} content={kindTip(k)}>
+                  <button
+                    type="button"
+                    onClick={() => runKind(k.key)}
+                    disabled={triggerMutation.isPending || (selectedModules !== null && selectedModules.length === 0)}
+                    aria-label={`${k.label}: ${k.summary}`}
+                    className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl transition-all disabled:opacity-60 ${style}`}
+                  >
+                    {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Icon className="w-4 h-4" />}
+                    {k.label}
+                  </button>
+                </HoverTip>
+              )
+            })}
             <button
               type="button"
-              onClick={() => setShowModulePicker(true)}
-              title="Choose which audit modules to run"
+              onClick={() => setShowOptions((v) => !v)}
+              title="Options for the next manual run: every sitemap URL, or only some modules"
               className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border transition-colors ${
-                isPartialSelection
+                everyUrl || isPartialSelection || showOptions
                   ? 'border-brand-300 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/40 text-brand-700 dark:text-brand-300'
                   : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 text-slate-600 dark:text-slate-300 hover:text-slate-800 dark:hover:text-slate-100'
               }`}
             >
               <SlidersHorizontal className="w-3.5 h-3.5" />
-              {moduleButtonLabel}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => triggerMutation.mutate({ scope: auditScope, modules: selectedModules, includeVisual })}
-              disabled={triggerMutation.isPending || (selectedModules !== null && selectedModules.length === 0)}
-              className="inline-flex items-center gap-2 px-5 py-2 text-sm font-semibold rounded-xl text-white bg-brand-600 hover:bg-brand-700 shadow-md shadow-brand-500/20 disabled:opacity-60 transition-all"
-            >
-              {triggerMutation.isPending ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  Auditing...
-                </>
-              ) : (
-                <>
-                  <Play className="w-4 h-4 fill-current" />
-                  Audit Now
-                </>
-              )}
+              Options
             </button>
           </div>
-          {auditScope === 'full' && (
+
+          {showOptions && (
+            <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-2 text-xs text-slate-600 dark:text-slate-300">
+              <label
+                className="inline-flex items-center gap-1.5 cursor-pointer"
+                title="Full and Visual audits normally cover every WordPress Page plus the 10 newest posts. This makes them cover every URL in the sitemap, up to 500. Slow on big blogs."
+              >
+                <input
+                  type="checkbox"
+                  checked={everyUrl}
+                  onChange={(e) => setEveryUrl(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded text-brand-600 focus:ring-brand-500 border-slate-300 dark:border-slate-600"
+                />
+                Every URL in the sitemap (Full and Visual)
+              </label>
+              <button
+                type="button"
+                onClick={() => setShowModulePicker(true)}
+                title="Run only some modules, e.g. PageSpeed alone after a caching change"
+                className="inline-flex items-center gap-1 font-semibold text-brand-600 dark:text-brand-400 hover:underline"
+              >
+                Modules: {moduleButtonLabel}
+              </button>
+            </div>
+          )}
+          {everyUrl && (
             <p className="text-xs text-amber-600 dark:text-amber-400 max-w-xs text-right">
-              Scans every page and can take a long time — check back later.
+              Full and Visual will scan every sitemap URL and can take a long time — check back later.
             </p>
           )}
           {isPartialSelection && (
@@ -604,15 +632,16 @@ export const SiteDetailPage: React.FC = () => {
               No audit module results yet
             </h4>
             <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 mb-4">
-              Trigger a manual audit or wait for the scheduled full audit to inspect the audit modules.
+              Run an audit or wait for the scheduled one to see the module results here.
             </p>
             <button
-              onClick={() => triggerMutation.mutate({ scope: auditScope, modules: selectedModules, includeVisual })}
+              onClick={() => runKind('quick')}
               disabled={triggerMutation.isPending}
+              title="Homepage + up to 20 pages, no screenshots: a fast first look"
               className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg text-white bg-brand-600 hover:bg-brand-700"
             >
               <Play className="w-3.5 h-3.5 fill-current" />
-              Trigger First Audit
+              Run a Quick Audit
             </button>
           </div>
         ) : (

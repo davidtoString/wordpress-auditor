@@ -629,7 +629,7 @@ export const SettingsPage: React.FC = () => {
             type="button"
             onClick={() => runAllMutation.mutate(false)}
             disabled={runAllMutation.isPending}
-            title="Queue each active site's regular audit now (every module except the visual inspection, at the site's scope)"
+            title="Full audit on every active site, one after another: all pages + 10 recent posts (or the site's scheduled scope), every check except screenshots. About 25 minutes per site."
             className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-xl text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-all disabled:opacity-60"
           >
             {runAllMutation.isPending ? (
@@ -637,13 +637,13 @@ export const SettingsPage: React.FC = () => {
             ) : (
               <Play className="w-3.5 h-3.5 fill-current" />
             )}
-            Run Regular Audits on All Sites
+            Run Full Audit on All Sites
           </button>
           <button
             type="button"
             onClick={() => runAllMutation.mutate(true)}
             disabled={runAllMutation.isPending}
-            title="Queue each active site's visual audit now (everything incl. screenshots and vision review; slow, uses vision credits)"
+            title="Visual audit on every active site, one after another: the full audit plus desktop and mobile screenshots reviewed by the vision model. 40+ minutes and about 1 cent per page, per site."
             className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-xl border border-emerald-600 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 transition-all disabled:opacity-60"
           >
             <Play className="w-3.5 h-3.5 fill-current" />
@@ -677,7 +677,7 @@ export const SettingsPage: React.FC = () => {
                   <tr key={job.id} className="hover:bg-slate-50 dark:hover:bg-slate-750">
                     <td className="py-3 px-3 font-semibold text-slate-800 dark:text-slate-200">
                       {job.site_id
-                        ? `${job.kind === 'visual' ? 'Visual audit' : 'Regular audit'} · ${job.scope === 'full' ? 'full website' : 'pages + recent posts'}`
+                        ? `${job.kind === 'visual' ? 'Visual audit' : 'Full audit'} · ${job.scope === 'full' ? 'every URL in the sitemap' : 'all pages + 10 recent posts'}`
                         : job.name || job.id}
                     </td>
                     <td className="py-3 px-3 text-slate-600 dark:text-slate-400">

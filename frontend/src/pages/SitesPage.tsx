@@ -264,7 +264,7 @@ export const SitesPage: React.FC = () => {
                     <td className="py-4 px-4">
                       <div
                         className="inline-flex flex-col gap-0.5 px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-xs text-slate-700 dark:text-slate-300"
-                        title={`regular: ${site.cron_schedule || '0 6 * * 1'}${site.visual_cron_schedule ? ` · visual: ${site.visual_cron_schedule}` : ''} (Mexico City)`}
+                        title={`full audit: ${site.cron_schedule || '0 6 * * 1'}${site.visual_cron_schedule ? ` · visual: ${site.visual_cron_schedule}` : ''} (Mexico City)`}
                       >
                         <span className="inline-flex items-center gap-1.5">
                           <Calendar className="w-3 h-3 text-slate-400" />

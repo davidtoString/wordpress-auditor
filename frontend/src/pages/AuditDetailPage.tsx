@@ -19,6 +19,7 @@ import {
   ChevronDown,
 } from 'lucide-react'
 import { audits as auditsApi } from '../lib/api'
+import { describeRunKind, SCOPE_LABELS } from '../lib/auditKinds'
 import type { ModuleResult } from '../lib/types'
 import ScoreBadge from '../components/ScoreBadge'
 import ModuleCard from '../components/ModuleCard'
@@ -208,7 +209,7 @@ export const AuditDetailPage: React.FC = () => {
                 <span>&bull;</span>
                 <span className="flex items-center gap-1">
                   <LayoutGrid className="w-3.5 h-3.5 text-slate-400" />
-                  Scope: {audit.scope === 'quick' ? 'Quick (up to 20 pages)' : audit.scope === 'with_posts' ? 'All pages + recent posts' : 'Full website'}
+                  {describeRunKind(audit).label} audit · {SCOPE_LABELS[audit.scope] || audit.scope}
                 </span>
               </>
             )}
