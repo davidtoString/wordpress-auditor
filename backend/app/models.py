@@ -66,7 +66,14 @@ class Site(Base):
     name = sa.Column(sa.String(255), nullable=False)
     url = sa.Column(sa.String(500), unique=True, index=True, nullable=False)
     is_active = sa.Column(sa.Boolean, default=True, nullable=False)
-    cron_schedule = sa.Column(sa.String(100), default="0 6 * * *", nullable=False)
+    # Two schedules per site. The regular audit runs every module except the visual inspection
+    # (default weekly); the visual audit runs everything including screenshots + vision review
+    # (default monthly, it is the slow and paid one). Each has its own crawl scope:
+    # "with_posts" = every WordPress Page plus a few recent posts, "full" = every sitemap URL.
+    cron_schedule = sa.Column(sa.String(100), default="0 6 * * 1", nullable=False)
+    cron_scope = sa.Column(sa.String(20), default="with_posts", nullable=False)
+    visual_cron_schedule = sa.Column(sa.String(100), nullable=True)  # NULL/empty = no visual schedule
+    visual_cron_scope = sa.Column(sa.String(20), default="with_posts", nullable=False)
     notify_email = sa.Column(sa.String(255), nullable=True)  # override alert email for this site
     wp_username = sa.Column(sa.String(255), nullable=True)
     wp_app_password = sa.Column(sa.String(255), nullable=True)
@@ -104,6 +111,9 @@ class AuditRun(Base):
     # `modules IS NULL` full-run filters below do not match (full runs would vanish from the
     # headline score / latest audit / trend). Store None as SQL NULL instead.
     modules = sa.Column(sa.JSON(none_as_null=True), nullable=True)
+    # False for the regular scheduled audit: a complete run (headline score, alerts, baseline)
+    # that leaves out the visual inspection module, which has its own monthly schedule.
+    include_visual = sa.Column(sa.Boolean, default=True, nullable=False, server_default=sa.true())
     started_at = sa.Column(sa.DateTime, nullable=True)
     completed_at = sa.Column(sa.DateTime, nullable=True)
     overall_score = sa.Column(sa.Float, nullable=True)

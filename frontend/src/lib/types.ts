@@ -17,11 +17,19 @@ export interface AuthTokens {
   user?: User
 }
 
+/** Crawl scope a schedule uses: every Page + a few recent posts, or every sitemap URL. */
+export type ScheduleScope = 'with_posts' | 'full'
+
 export interface Site {
   id: string
   name: string
   url: string
+  /** Regular audit (every module except the visual inspection). */
   cron_schedule: string
+  cron_scope?: ScheduleScope
+  /** Visual audit (everything incl. screenshots + vision review); null/'' = not scheduled. */
+  visual_cron_schedule?: string | null
+  visual_cron_scope?: ScheduleScope
   notify_email?: string | null
   wp_username?: string | null
   wp_app_password?: string | null
@@ -79,6 +87,9 @@ export interface SiteCreateInput {
   name: string
   url: string
   cron_schedule?: string
+  cron_scope?: ScheduleScope
+  visual_cron_schedule?: string | null
+  visual_cron_scope?: ScheduleScope
   notify_email?: string | null
   wp_username?: string | null
   wp_app_password?: string | null
@@ -117,6 +128,8 @@ export interface Audit {
   scope: AuditScope
   /** Module subset this run was limited to; null/undefined = full run. */
   modules?: string[] | null
+  /** false = complete run that left out the visual inspection (the weekly schedule). */
+  include_visual?: boolean
   started_at: string
   completed_at?: string | null
   duration_seconds?: number | null
@@ -258,6 +271,7 @@ export interface Settings {
 export interface SchedulerJob {
   id: string
   name: string
+  kind?: 'regular' | 'visual' | null
   site_id?: string
   site_name?: string
   cron_expression: string

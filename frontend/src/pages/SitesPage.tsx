@@ -263,11 +263,18 @@ export const SitesPage: React.FC = () => {
 
                     <td className="py-4 px-4">
                       <div
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-xs text-slate-700 dark:text-slate-300"
-                        title={`cron: ${site.cron_schedule || '0 6 * * *'} (Mexico City)`}
+                        className="inline-flex flex-col gap-0.5 px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-xs text-slate-700 dark:text-slate-300"
+                        title={`regular: ${site.cron_schedule || '0 6 * * 1'}${site.visual_cron_schedule ? ` · visual: ${site.visual_cron_schedule}` : ''} (Mexico City)`}
                       >
-                        <Calendar className="w-3 h-3 text-slate-400" />
-                        {site.is_active === false ? 'Manual only' : describeCron(site.cron_schedule || '0 6 * * *')}
+                        <span className="inline-flex items-center gap-1.5">
+                          <Calendar className="w-3 h-3 text-slate-400" />
+                          {site.is_active === false ? 'Manual only' : describeCron(site.cron_schedule || '0 6 * * 1')}
+                        </span>
+                        {site.is_active !== false && (
+                          <span className="text-[11px] text-slate-500 dark:text-slate-400 pl-[18px]">
+                            {site.visual_cron_schedule ? `Visual ${describeCron(site.visual_cron_schedule).replace(/^(\w)/, (c) => c.toLowerCase())}` : 'No visual schedule'}
+                          </span>
+                        )}
                       </div>
                     </td>
 

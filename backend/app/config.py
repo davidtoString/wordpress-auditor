@@ -28,8 +28,10 @@ class Settings(BaseSettings):
     # section-by-section vision review, and which model judges them. A "gemini-*" model uses the
     # Gemini key (~$0.01 per page with gemini-3.5-flash-lite), anything else the OpenAI key
     # (~$0.04 per page with gpt-4o). Tested 2026-11: gemini-3.5-flash-lite matched gpt-4o exactly.
-    VISUAL_MAX_PAGES: int = 60
-    VISUAL_VISION_PAGE_BUDGET: int = 25
+    # Defaults sized for the monthly visual schedule with Gemini Flash-Lite: every page of a
+    # typical client site captured and reviewed for about $1 per site per month.
+    VISUAL_MAX_PAGES: int = 150
+    VISUAL_VISION_PAGE_BUDGET: int = 100
     VISION_MODEL: str = "gemini-3.5-flash-lite"
     FRONTEND_URL: str = "http://localhost:3000"
     DEBUG: bool = False

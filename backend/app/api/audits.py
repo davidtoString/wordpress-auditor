@@ -54,6 +54,7 @@ class AuditRunDetail(BaseModel):
     triggered_by: str
     scope: str = "quick"
     modules: Optional[List[str]] = None  # None = full run; otherwise the module subset that ran
+    include_visual: bool = True  # False = complete run that skipped the visual inspection (weekly schedule)
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     overall_score: Optional[float]
@@ -75,6 +76,7 @@ class AuditRunListItem(BaseModel):
     triggered_by: str
     scope: str = "quick"
     modules: Optional[List[str]] = None  # None = full run; otherwise the module subset that ran
+    include_visual: bool = True  # False = complete run that skipped the visual inspection (weekly schedule)
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     overall_score: Optional[float]
@@ -118,6 +120,7 @@ def list_audits(
             triggered_by=run.triggered_by,
             scope=run.scope,
         modules=run.modules,
+        include_visual=run.include_visual if run.include_visual is not None else True,
             started_at=run.started_at,
             completed_at=run.completed_at,
             overall_score=run.overall_score,
@@ -175,6 +178,7 @@ def get_audit(
         triggered_by=run.triggered_by,
         scope=run.scope,
         modules=run.modules,
+        include_visual=run.include_visual if run.include_visual is not None else True,
         started_at=run.started_at,
         completed_at=run.completed_at,
         overall_score=run.overall_score,
@@ -308,6 +312,26 @@ def get_latest_audit_for_site(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No audits found for this site")
 
     results = _ordered_results(db.query(AuditResult).filter(AuditResult.audit_run_id == run.id).all())
+    if not any(getattr(r, "module", None) == "visual" for r in results):
+        # The regular (weekly) run leaves the visual inspection to its own monthly schedule. Show
+        # the latest visual result anyway, stamped with the run it came from so it never reads
+        # as a measurement from this run.
+        latest_visual = (
+            db.query(AuditResult)
+            .join(AuditRun, AuditRun.id == AuditResult.audit_run_id)
+            .filter(AuditRun.site_id == site.id, AuditRun.status == "completed", AuditResult.module == "visual")
+            .order_by(AuditRun.created_at.desc())
+            .first()
+        )
+        if latest_visual is not None:
+            vis_run = db.query(AuditRun).filter(AuditRun.id == latest_visual.audit_run_id).first()
+            details = dict(latest_visual.details or {}) if isinstance(latest_visual.details, dict) else {"raw": latest_visual.details}
+            details["from_run_id"] = str(latest_visual.audit_run_id)
+            details["from_run_at"] = (vis_run.completed_at or vis_run.created_at).isoformat() if vis_run else None
+            carried = AuditResult(id=latest_visual.id, audit_run_id=latest_visual.audit_run_id, module="visual",
+                                  score=latest_visual.score, status=latest_visual.status,
+                                  summary=latest_visual.summary, details=details, created_at=latest_visual.created_at)
+            results = _ordered_results(list(results) + [carried])
 
     return AuditRunDetail(
         id=run.id,
@@ -318,6 +342,7 @@ def get_latest_audit_for_site(
         triggered_by=run.triggered_by,
         scope=run.scope,
         modules=run.modules,
+        include_visual=run.include_visual if run.include_visual is not None else True,
         started_at=run.started_at,
         completed_at=run.completed_at,
         overall_score=run.overall_score,

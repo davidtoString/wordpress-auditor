@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 from typing import Any, List, Dict
 from app.config import settings
@@ -116,7 +117,8 @@ async def generate_audit_summary(site_url: str, results: List[Dict[str, Any]]) -
                 import google.generativeai as genai
                 genai.configure(api_key=settings.GEMINI_API_KEY, transport="rest")
                 model = genai.GenerativeModel("gemini-3.5-flash")  # 1.5 models were retired by Google
-                response = await model.generate_content_async(prompt, request_options={"timeout": 90})
+                # REST transport has no async client in google-generativeai 0.8: run the sync call in a thread.
+                response = await asyncio.to_thread(model.generate_content, prompt, request_options={"timeout": 90})
                 if response and response.text:
                     return response.text.strip()
             except Exception as exc:
@@ -165,7 +167,7 @@ async def generate_brief_narrative(site_url: str, brief_markdown: str) -> str | 
             import google.generativeai as genai
             genai.configure(api_key=settings.GEMINI_API_KEY, transport="rest")
             model = genai.GenerativeModel("gemini-3.5-flash-lite")  # 1.5 models were retired by Google
-            response = await model.generate_content_async(prompt, request_options={"timeout": 60})
+            response = await asyncio.to_thread(model.generate_content, prompt, request_options={"timeout": 60})
             if response and response.text:
                 return response.text.strip()
         except Exception as exc:

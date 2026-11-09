@@ -11,6 +11,7 @@ import {
 import type { ModuleResult } from '../lib/types'
 import {
   cn,
+  formatDate,
   moduleDisplayName,
   moduleIcon,
   scoreToColor,
@@ -994,6 +995,12 @@ export const ModuleCard: React.FC<ModuleCardProps> = ({ moduleKey, result }) => 
         <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed min-h-[36px]">
           {result.summary || 'Audit completed without summary remarks.'}
         </p>
+        {typeof result.details === 'object' && result.details !== null && !Array.isArray(result.details) && (result.details as any).from_run_id && (
+          <p className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+            Not part of this run: carried over from the visual audit
+            {(result.details as any).from_run_at ? ` on ${formatDate((result.details as any).from_run_at)}` : ''}.
+          </p>
+        )}
       </div>
 
       {/* Details Toggle */}

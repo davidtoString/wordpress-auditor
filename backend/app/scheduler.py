@@ -88,7 +88,8 @@ def queue_length() -> int:
 
 
 def dispatch_audit(
-    site_id_str: str, triggered_by: str, scope: str, modules: list[str] | None = None
+    site_id_str: str, triggered_by: str, scope: str, modules: list[str] | None = None,
+    include_visual: bool = True,
 ) -> uuid.UUID:
     """Record the run as pending right away (so it is visible as queued), start it as a
     trackable asyncio Task and register it so it can be cancelled. Returns the audit_run_id."""
@@ -99,12 +100,12 @@ def dispatch_audit(
         now_utc = datetime.now(timezone.utc)
         db.add(AuditRun(
             id=audit_run_id, site_id=uuid.UUID(site_id_str), status="pending", triggered_by=triggered_by,
-            scope=scope, modules=selected, created_at=now_utc,
+            scope=scope, modules=selected, include_visual=include_visual, created_at=now_utc,
         ))
         db.commit()
     finally:
         db.close()
-    coro = execute_site_audit(site_id_str, triggered_by, scope, audit_run_id, selected)
+    coro = execute_site_audit(site_id_str, triggered_by, scope, audit_run_id, selected, include_visual=include_visual)
 
     def _start() -> None:
         task = asyncio.create_task(coro)
@@ -215,11 +216,15 @@ def compute_overall_score(module_scores: list[tuple[str, float | None]]) -> floa
 
 APP_TIMEZONE = "America/Mexico_City"
 
-# Scheduled (cron) audits always run the full scope: every URL the sitemap lists (pages, posts,
-# other types, up to the crawler's safety cap) and Lighthouse on up to LH_MAX_ROUTES_FULL of them.
-# "quick" is for manual spot checks from the UI; a scheduled audit that skipped half the site
-# would report a clean bill of health it has not earned.
-SCHEDULED_SCOPE = "full"
+# Each site has two schedules (see models.Site): the regular audit (every module except the
+# visual inspection, default weekly) and the visual audit (everything, default monthly). Their
+# crawl scope is stored per site: "with_posts" = every Page + a few recent posts (default) or
+# "full" = every sitemap URL. "quick" is for manual spot checks from the UI only; a scheduled
+# audit that skipped half the site would report a clean bill of health it has not earned.
+SCHEDULE_SCOPES = ("with_posts", "full")
+DEFAULT_SCHEDULED_SCOPE = "with_posts"
+SCHEDULED_SCOPE = DEFAULT_SCHEDULED_SCOPE  # backwards-compatible alias
+SCHEDULE_KINDS = ("regular", "visual")
 
 
 # Standard cron numbers weekdays 0=Sunday..6=Saturday (7=Sunday too). APScheduler 3.x numbers
@@ -259,19 +264,30 @@ def describe_next_run(cron_str: str) -> str:
         return f"invalid ({exc})"
 
 
+def job_id_for(site_id: str, kind: str) -> str:
+    return f"{'visual' if kind == 'visual' else 'audit'}_site_{site_id}"
+
+
 def schedule_site_audit(site: Site) -> None:
-    job_id = f"audit_site_{site.id}"
-    try:
-        trigger = _parse_cron_trigger(site.cron_schedule or "0 6 * * *")
-        scheduler.add_job(
-            func=trigger_scheduled_audit, trigger=trigger, args=[str(site.id)], id=job_id,
-            replace_existing=True, name=f"Audit for {site.name} ({site.url})",
-            misfire_grace_time=3600, coalesce=True,
-        )
-        logger.info("Scheduled full audit job '%s' with cron '%s', next run %s", job_id, site.cron_schedule,
-                    describe_next_run(site.cron_schedule or "0 6 * * *"))
-    except Exception as exc:
-        logger.error("Failed scheduling site %s: %s", site.id, exc)
+    """Register the site's regular job (all modules but visual) and, when it has a visual
+    schedule, the visual job (all modules). Each carries the scope stored for it."""
+    plans = [("regular", site.cron_schedule or "0 6 * * 1", site.cron_scope or DEFAULT_SCHEDULED_SCOPE)]
+    if (site.visual_cron_schedule or "").strip():
+        plans.append(("visual", site.visual_cron_schedule.strip(), site.visual_cron_scope or DEFAULT_SCHEDULED_SCOPE))
+    for kind, cron, scope in plans:
+        job_id = job_id_for(str(site.id), kind)
+        try:
+            trigger = _parse_cron_trigger(cron)
+            scheduler.add_job(
+                func=trigger_scheduled_audit, trigger=trigger, args=[str(site.id), kind], id=job_id,
+                replace_existing=True,
+                name=f"{'Visual' if kind == 'visual' else 'Regular'} audit for {site.name} ({site.url})",
+                misfire_grace_time=3600, coalesce=True,
+            )
+            logger.info("Scheduled %s audit job '%s' (scope %s) with cron '%s', next run %s",
+                        kind, job_id, scope, cron, describe_next_run(cron))
+        except Exception as exc:
+            logger.error("Failed scheduling %s audit for site %s: %s", kind, site.id, exc)
 
 
 def reschedule_site(site: Site) -> None:
@@ -281,30 +297,48 @@ def reschedule_site(site: Site) -> None:
 
 
 def unschedule_site(site_id: str) -> None:
-    job_id = f"audit_site_{site_id}"
-    if scheduler.get_job(job_id):
-        scheduler.remove_job(job_id)
-        logger.info("Unscheduled audit job '%s'", job_id)
+    for kind in SCHEDULE_KINDS:
+        job_id = job_id_for(site_id, kind)
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+            logger.info("Unscheduled %s audit job '%s'", kind, job_id)
 
 
-def trigger_scheduled_audit(site_id_str: str) -> None:
+def scheduled_run_plan(site_id_str: str, kind: str) -> tuple[str, bool]:
+    """(scope, include_visual) for one of a site's schedules, read fresh from the database so
+    an edit in the UI applies to the next firing without re-registering the job."""
+    db = SessionLocal()
+    try:
+        site = db.query(Site).filter(Site.id == uuid.UUID(site_id_str)).first()
+        if site is None:
+            raise ValueError(f"site {site_id_str} no longer exists")
+        if kind == "visual":
+            return (site.visual_cron_scope or DEFAULT_SCHEDULED_SCOPE), True
+        return (site.cron_scope or DEFAULT_SCHEDULED_SCOPE), False
+    finally:
+        db.close()
+
+
+def trigger_scheduled_audit(site_id_str: str, kind: str = "regular") -> None:
     """APScheduler thread entry point. Hands the run to the main loop's queue; several sites
     sharing one cron expression now queue instead of running simultaneously."""
     loop = _MAIN_LOOP
     if loop is not None and loop.is_running():
-        loop.call_soon_threadsafe(_dispatch_from_thread, site_id_str)
+        loop.call_soon_threadsafe(_dispatch_from_thread, site_id_str, kind)
         return
     try:
-        asyncio.run(execute_site_audit(site_id_str, triggered_by="cron", scope=SCHEDULED_SCOPE))
+        scope, include_visual = scheduled_run_plan(site_id_str, kind)
+        asyncio.run(execute_site_audit(site_id_str, triggered_by="cron", scope=scope, include_visual=include_visual))
     except Exception as exc:
-        logger.error("Error running scheduled audit for site %s: %s", site_id_str, exc)
+        logger.error("Error running scheduled %s audit for site %s: %s", kind, site_id_str, exc)
 
 
-def _dispatch_from_thread(site_id_str: str) -> None:
+def _dispatch_from_thread(site_id_str: str, kind: str = "regular") -> None:
     try:
-        dispatch_audit(site_id_str, "cron", SCHEDULED_SCOPE)
+        scope, include_visual = scheduled_run_plan(site_id_str, kind)
+        dispatch_audit(site_id_str, "cron", scope, include_visual=include_visual)
     except Exception as exc:
-        logger.error("Could not queue scheduled audit for site %s: %s", site_id_str, exc)
+        logger.error("Could not queue scheduled %s audit for site %s: %s", kind, site_id_str, exc)
 
 
 def schedule_weekly_digest() -> None:
@@ -446,6 +480,7 @@ async def execute_site_audit(
     scope: str = "quick",
     audit_run_id: uuid.UUID | None = None,
     modules: list[str] | None = None,
+    include_visual: bool = True,
 ) -> AuditRun | None:
     """Core audit pipeline for one site:
     1. Wait for the audit slot (one site at a time), mark the run running
@@ -460,7 +495,10 @@ async def execute_site_audit(
     audit_run_id = audit_run_id or uuid.uuid4()
     site_uuid = uuid.UUID(site_id_str) if isinstance(site_id_str, str) else site_id_str
     selected_modules = normalize_modules(modules)
-    active_modules = selected_modules or list(AUDIT_MODULES)
+    # A run without the visual module is still a complete audit (headline score, alerts,
+    # comparison baseline): the visual inspection has its own schedule and its findings are
+    # simply left untouched until it runs (reconcile only resolves measured modules).
+    active_modules = selected_modules or [m for m in AUDIT_MODULES if include_visual or m != "visual"]
     is_partial = selected_modules is not None
 
     try:
@@ -473,7 +511,7 @@ async def execute_site_audit(
         if audit_run is None:
             now_utc = datetime.now(timezone.utc)
             audit_run = AuditRun(id=audit_run_id, site_id=site.id, status="pending", triggered_by=triggered_by,
-                                 scope=scope, modules=selected_modules, created_at=now_utc)
+                                 scope=scope, modules=selected_modules, include_visual=include_visual, created_at=now_utc)
             db.add(audit_run)
             db.commit()
             db.refresh(audit_run)
@@ -484,7 +522,8 @@ async def execute_site_audit(
             db.commit()
             logger.info("Started audit run %s for site %s (%s), scope=%s, modules=%s (queue: %d)",
                         audit_run.id, site.name, site.url, scope,
-                        ",".join(selected_modules) if is_partial else "all", queue_length())
+                        ",".join(selected_modules) if is_partial else ("all" if include_visual else "all but visual"),
+                        queue_length())
 
             results: list[AuditModuleResult] = []
 
@@ -508,8 +547,9 @@ async def execute_site_audit(
             page_statuses: dict[str, int] = {}
             fetch_sem = asyncio.Semaphore(4)
             target_paths: list[str] = ["/"]
-            # Visual inspection covers WordPress Pages only (home, services, contact...). Blog posts
-            # share one template; screenshotting hundreds of them costs time and money for nothing.
+            # Visual inspection covers the WordPress Pages (home, services, contact...) plus ONE blog
+            # post, whatever the crawl scope: posts share a template, so one screenshot covers them
+            # all and hundreds more would cost time and vision credits for nothing.
             visual_paths: list[str] = ["/"]
             crawl_stats: dict[str, Any] = {}
 
@@ -520,6 +560,7 @@ async def execute_site_audit(
                                 site.url, scope, crawl.crawl_error)
                 crawl_stats = {"pages": len(crawl.pages), "posts": len(crawl.posts), "other": len(crawl.other),
                                "targets": len(crawl.target_urls), "error": crawl.crawl_error, "scope": scope,
+                               "sitemap_incomplete": crawl.sitemap_incomplete, "failed_sitemaps": crawl.failed_sitemaps[:10],
                                # Every URL the sitemap listed (not just the ones scanned), so the next run can
                                # tell "page deleted from the site" from "page not in this run's scan set".
                                "sitemap_urls": [u.rstrip("/") for u in (crawl.pages + crawl.posts + crawl.other)][:1500]}
@@ -549,6 +590,11 @@ async def execute_site_audit(
                 visual_paths = ["/"] + [p for p in target_paths if p != "/" and (p.rstrip("/") or "/") in page_set]
                 if len(visual_paths) == 1 and not crawl.pages:
                     visual_paths = target_paths  # sitemap did not classify anything: fall back to the scan set
+                if crawl.posts:
+                    # Right after the homepage so the capture cap (VISUAL_MAX_PAGES) never drops it.
+                    newest_post = urlparse(crawl.posts[0]).path or "/"
+                    if newest_post not in visual_paths:
+                        visual_paths.insert(1, newest_post)
 
             # 3. Concurrent modules
             factories: dict[str, Any] = {
@@ -656,6 +702,7 @@ async def execute_site_audit(
                     logger.debug("downtime lookup failed: %s", exc)
             brief = build_brief(site, audit_run, results_dicts, reconciled, changes, inventory, previous_run)
             brief["partial"] = is_partial
+            brief["include_visual"] = include_visual and "visual" in active_modules
 
             # 6. Narrative
             ai_summary = None

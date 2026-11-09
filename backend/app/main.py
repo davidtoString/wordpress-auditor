@@ -161,6 +161,10 @@ async def lifespan(app: FastAPI):
         conn.execute(sa.text("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS brief JSON"))
         conn.execute(sa.text("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS ai_summary TEXT"))
         conn.execute(sa.text("ALTER TABLE sites ADD COLUMN IF NOT EXISTS search_console_property VARCHAR(255)"))
+        conn.execute(sa.text("ALTER TABLE sites ADD COLUMN IF NOT EXISTS cron_scope VARCHAR(20) NOT NULL DEFAULT 'with_posts'"))
+        conn.execute(sa.text("ALTER TABLE sites ADD COLUMN IF NOT EXISTS visual_cron_schedule VARCHAR(100) DEFAULT '0 6 1 * *'"))
+        conn.execute(sa.text("ALTER TABLE sites ADD COLUMN IF NOT EXISTS visual_cron_scope VARCHAR(20) NOT NULL DEFAULT 'with_posts'"))
+        conn.execute(sa.text("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS include_visual BOOLEAN NOT NULL DEFAULT TRUE"))
         for col, typ in (("mute_kind", "VARCHAR(20)"), ("mute_until", "TIMESTAMP"), ("mute_note", "TEXT"),
                          ("muted_at", "TIMESTAMP"), ("muted_by", "VARCHAR(255)")):
             conn.execute(sa.text(f"ALTER TABLE findings ADD COLUMN IF NOT EXISTS {col} {typ}"))

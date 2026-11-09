@@ -634,8 +634,18 @@ def diff_inventory(prev: dict[str, Any] | None, cur: dict[str, Any], site_url: s
            count=len(only_scanned))
 
     removed = sorted(set(pp) - set(cp))
-    gone = [u for u in removed if cur_set is None or u.rstrip("/") not in cur_set]
-    only_unscanned = [u for u in removed if cur_set is not None and u.rstrip("/") in cur_set]
+    incomplete = bool((cur.get("crawl") or {}).get("sitemap_incomplete"))
+    if incomplete:
+        # Part of the sitemap did not download this run: a page missing from the list proves
+        # nothing. Treat every removal as "not scanned" and say so once.
+        gone, only_unscanned = [], removed
+        failed = (cur.get("crawl") or {}).get("failed_sitemaps") or []
+        ch("sitemap_incomplete", "medium",
+           f"Sitemap incomplete this run: {len(failed)} file(s) could not be fetched ({', '.join(u.rsplit('/', 1)[-1] for u in failed[:3])}); "
+           "page removals were not evaluated", failed_sitemaps=failed)
+    else:
+        gone = [u for u in removed if cur_set is None or u.rstrip("/") not in cur_set]
+        only_unscanned = [u for u in removed if cur_set is not None and u.rstrip("/") in cur_set]
     if len(gone) > 10:
         ch("pages_removed", "medium", f"{len(gone)} pages no longer in the sitemap (first: {_path(gone[0], site_url)})",
            urls=gone[:50], count=len(gone))
@@ -719,7 +729,7 @@ def diff_inventory(prev: dict[str, Any] | None, cur: dict[str, Any], site_url: s
 
     # Collections aggregated over the scanned pages (tags, runtime scripts, schema types) can
     # only shrink for real when this run scanned at least the pages the previous run did.
-    narrower = bool(only_unscanned)
+    narrower = bool(only_unscanned) or incomplete
 
     # Tracking and third parties
     pt, ct = set(prev.get("tracking_ids") or []), set(cur.get("tracking_ids") or [])
@@ -934,6 +944,9 @@ def build_brief(
         det = r.get("details") or {}
         if r.get("status") == "error" or (isinstance(det, dict) and det.get("not_measured")):
             notes.append(f"{r['module']}: {r.get('summary') or 'not measured'}")
+    crawl_info = (inventory.get("crawl") or {}) if isinstance(inventory, dict) else {}
+    if crawl_info.get("sitemap_incomplete"):
+        notes.append(f"crawl: {crawl_info.get('error') or 'sitemap incomplete'}; findings on the unlisted pages stay open unchanged.")
     held = reconciled.get("held_open") or []
     if held:
         notes.append(f"{len(held)} open finding(s) are on pages this {run.scope} run did not scan; "

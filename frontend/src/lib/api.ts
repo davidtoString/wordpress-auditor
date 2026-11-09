@@ -142,12 +142,15 @@ export const sites = {
   async triggerAudit(
     id: string,
     scope: AuditScope = 'quick',
-    modules: string[] | null = null
+    modules: string[] | null = null,
+    includeVisual: boolean = true
   ): Promise<Audit> {
     // `modules` null/empty = run every module; otherwise a subset of names from audits.listModules().
+    // includeVisual=false runs a complete audit without the visual inspection (what the weekly schedule does).
     const response = await api.post<Audit>(`/sites/${id}/audit`, {
       scope,
       modules: modules && modules.length > 0 ? modules : null,
+      include_visual: includeVisual,
     })
     return response.data
   },
@@ -253,8 +256,10 @@ export const settings = {
     const response = await api.get<SchedulerJob[]>('/settings/scheduler/jobs')
     return response.data
   },
-  async runAll(): Promise<{ message: string; triggered_count?: number }> {
-    const response = await api.post<{ message: string; triggered_count?: number }>('/settings/scheduler/run-all')
+  async runAll(visual = false): Promise<{ message: string; count?: number; kind?: string }> {
+    const response = await api.post<{ message: string; count?: number; kind?: string }>('/settings/scheduler/run-all', null, {
+      params: { visual },
+    })
     return response.data
   },
   async testGoogle(): Promise<GoogleTestResult> {

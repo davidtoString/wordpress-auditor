@@ -208,7 +208,18 @@ export const AuditDetailPage: React.FC = () => {
                 <span>&bull;</span>
                 <span className="flex items-center gap-1">
                   <LayoutGrid className="w-3.5 h-3.5 text-slate-400" />
-                  Scope: {audit.scope === 'quick' ? 'Quick (Pages)' : audit.scope === 'with_posts' ? '+ Blog Posts' : 'Full Site'}
+                  Scope: {audit.scope === 'quick' ? 'Quick (up to 20 pages)' : audit.scope === 'with_posts' ? 'All pages + recent posts' : 'Full website'}
+                </span>
+              </>
+            )}
+            {audit.include_visual === false && (!audit.modules || audit.modules.length === 0) && (
+              <>
+                <span>&bull;</span>
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-700/60 text-slate-600 dark:text-slate-300 font-medium"
+                  title="Regular audit: every module ran except the visual inspection, which has its own schedule. Visual findings were left as they were."
+                >
+                  No visual inspection
                 </span>
               </>
             )}

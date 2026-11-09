@@ -15,8 +15,8 @@ from app.auditors.base import BaseAuditor
 from app.auth.utils import get_current_user, require_admin
 from app.database import get_db
 from app.models import AuditRun, Finding, Site, UptimeIncident, User
-from app.scheduler import (AUDIT_MODULES, _parse_cron_trigger, dispatch_audit, reschedule_site, unschedule_site,
-                           normalize_modules)
+from app.scheduler import (AUDIT_MODULES, SCHEDULE_SCOPES, _parse_cron_trigger, dispatch_audit, reschedule_site,
+                           unschedule_site, normalize_modules)
 
 
 def _validate_cron(expr: str) -> str:
@@ -66,10 +66,29 @@ async def detect_canonical_mismatch(url: str) -> Optional[str]:
     return None
 
 
+def _validate_optional_cron(expr: Optional[str]) -> Optional[str]:
+    """Empty/None disables the schedule; anything else must parse."""
+    expr = (expr or "").strip()
+    return _validate_cron(expr) if expr else None
+
+
+def _validate_scope(scope: Optional[str], default: str = "with_posts") -> str:
+    scope = (scope or default).strip()
+    if scope not in SCHEDULE_SCOPES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"Schedule scope must be one of {', '.join(SCHEDULE_SCOPES)}")
+    return scope
+
+
 class SiteCreate(BaseModel):
     name: str
     url: str
-    cron_schedule: str = "0 6 * * *"
+    # Regular audit (every module except the visual inspection), default weekly Monday 6 AM.
+    cron_schedule: str = "0 6 * * 1"
+    cron_scope: str = "with_posts"
+    # Visual audit (everything incl. screenshots + vision review), default monthly on the 1st.
+    visual_cron_schedule: Optional[str] = "0 6 1 * *"
+    visual_cron_scope: str = "with_posts"
     notify_email: Optional[str] = None
     wp_username: Optional[str] = None
     wp_app_password: Optional[str] = None
@@ -84,6 +103,9 @@ class SiteUpdate(BaseModel):
     url: Optional[str] = None
     is_active: Optional[bool] = None
     cron_schedule: Optional[str] = None
+    cron_scope: Optional[str] = None
+    visual_cron_schedule: Optional[str] = None  # "" disables the visual schedule
+    visual_cron_scope: Optional[str] = None
     notify_email: Optional[str] = None
     wp_username: Optional[str] = None
     wp_app_password: Optional[str] = None
@@ -101,6 +123,9 @@ class SiteResponse(BaseModel):
     url: str
     is_active: bool
     cron_schedule: str
+    cron_scope: str = "with_posts"
+    visual_cron_schedule: Optional[str] = None
+    visual_cron_scope: str = "with_posts"
     notify_email: Optional[str]
     wp_username: Optional[str]
     wp_app_password_configured: bool = False
@@ -135,6 +160,7 @@ class AuditRunSummary(BaseModel):
     triggered_by: str
     scope: str = "quick"
     modules: Optional[List[str]] = None  # None = full run; otherwise the subset that ran
+    include_visual: bool = True
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     overall_score: Optional[float]
@@ -188,6 +214,9 @@ def list_sites(
             "url": site.url,
             "is_active": site.is_active,
             "cron_schedule": site.cron_schedule,
+            "cron_scope": site.cron_scope or "with_posts",
+            "visual_cron_schedule": site.visual_cron_schedule,
+            "visual_cron_scope": site.visual_cron_scope or "with_posts",
             "notify_email": site.notify_email,
             "wp_username": site.wp_username,
             "wp_app_password_configured": bool(site.wp_app_password),
@@ -243,6 +272,9 @@ async def create_site(
         name=payload.name,
         url=norm_url,
         cron_schedule=_validate_cron(payload.cron_schedule),
+        cron_scope=_validate_scope(payload.cron_scope),
+        visual_cron_schedule=_validate_optional_cron(payload.visual_cron_schedule),
+        visual_cron_scope=_validate_scope(payload.visual_cron_scope),
         notify_email=payload.notify_email,
         wp_username=payload.wp_username,
         wp_app_password=payload.wp_app_password,
@@ -266,6 +298,9 @@ async def create_site(
         url=site.url,
         is_active=site.is_active,
         cron_schedule=site.cron_schedule,
+        cron_scope=site.cron_scope or "with_posts",
+        visual_cron_schedule=site.visual_cron_schedule,
+        visual_cron_scope=site.visual_cron_scope or "with_posts",
         notify_email=site.notify_email,
         wp_username=site.wp_username,
         wp_app_password_configured=bool(site.wp_app_password),
@@ -303,6 +338,9 @@ def get_site(
         url=site.url,
         is_active=site.is_active,
         cron_schedule=site.cron_schedule,
+        cron_scope=site.cron_scope or "with_posts",
+        visual_cron_schedule=site.visual_cron_schedule,
+        visual_cron_scope=site.visual_cron_scope or "with_posts",
         notify_email=site.notify_email,
         wp_username=site.wp_username,
         wp_app_password_configured=bool(site.wp_app_password),
@@ -341,6 +379,12 @@ async def update_site(
         redirect_warning = await detect_canonical_mismatch(site.url)
     if payload.cron_schedule is not None:
         site.cron_schedule = _validate_cron(payload.cron_schedule)
+    if payload.cron_scope is not None:
+        site.cron_scope = _validate_scope(payload.cron_scope)
+    if payload.visual_cron_schedule is not None:
+        site.visual_cron_schedule = _validate_optional_cron(payload.visual_cron_schedule)
+    if payload.visual_cron_scope is not None:
+        site.visual_cron_scope = _validate_scope(payload.visual_cron_scope)
     if payload.notify_email is not None:
         site.notify_email = payload.notify_email
     if payload.wp_username is not None:
@@ -370,6 +414,9 @@ async def update_site(
         url=site.url,
         is_active=site.is_active,
         cron_schedule=site.cron_schedule,
+        cron_scope=site.cron_scope or "with_posts",
+        visual_cron_schedule=site.visual_cron_schedule,
+        visual_cron_scope=site.visual_cron_scope or "with_posts",
         notify_email=site.notify_email,
         wp_username=site.wp_username,
         wp_app_password_configured=bool(site.wp_app_password),
@@ -454,6 +501,8 @@ class AuditTriggerRequest(BaseModel):
     # Optional subset of audit modules to run (names from GET /audits/modules, e.g.
     # ["pagespeed"] or ["advertools", "seo"]). Omit / null / empty = run every module.
     modules: Optional[List[str]] = None
+    # False = complete audit without the visual inspection (what the weekly schedule runs).
+    include_visual: bool = True
 
 
 @router.post("/{site_id}/audit")
@@ -484,15 +533,16 @@ async def trigger_audit(
 
     # Dispatch as a trackable asyncio Task (not fire-and-forget BackgroundTasks) so it can later
     # be cancelled via POST /audits/{audit_run_id}/cancel.
-    audit_run_id = dispatch_audit(str(site.id), "manual", payload.scope, selected)
+    audit_run_id = dispatch_audit(str(site.id), "manual", payload.scope, selected, include_visual=payload.include_visual)
 
     return {
         "message": f"Audit triggered for site '{site.name}' ({site.url})"
-                   + (f" — modules: {', '.join(selected)}" if selected else ""),
+                   + (f" — modules: {', '.join(selected)}" if selected else ("" if payload.include_visual else " — without visual inspection")),
         "site_id": site.id,
         "audit_run_id": audit_run_id,
         "scope": payload.scope,
         "modules": selected,
+        "include_visual": payload.include_visual,
         "status": "queued",
     }
 

@@ -40,6 +40,8 @@ import FindingsTable from '../components/FindingsTable'
 import UptimePanel from '../components/UptimePanel'
 import { formatDate, formatRelative } from '../lib/utils'
 import { describeCron } from '../lib/cron'
+
+const lower = (s: string) => s.replace(/^Daily/, 'daily').replace(/^Every/, 'every').replace(/^Weekdays/, 'weekdays').replace(/^Monthly/, 'monthly').replace(/^Custom/, 'custom')
 import toast from 'react-hot-toast'
 
 export const SiteDetailPage: React.FC = () => {
@@ -49,6 +51,7 @@ export const SiteDetailPage: React.FC = () => {
   const navigate = useNavigate()
   const [historyPage, setHistoryPage] = useState(1)
   const [auditScope, setAuditScope] = useState<AuditScope>('quick')
+  const [includeVisual, setIncludeVisual] = useState(false)
   // Module subset for the next manual run. null = every module (the default, full audit).
   const [selectedModules, setSelectedModules] = useState<string[] | null>(null)
   const [showModulePicker, setShowModulePicker] = useState(false)
@@ -88,15 +91,17 @@ export const SiteDetailPage: React.FC = () => {
 
   // 4. Trigger Audit Mutation
   const triggerMutation = useMutation({
-    mutationFn: ({ scope, modules }: { scope: AuditScope; modules: string[] | null }) =>
-      sitesApi.triggerAudit(id!, scope, modules),
-    onSuccess: (_data, { scope, modules }) => {
+    mutationFn: ({ scope, modules, includeVisual }: { scope: AuditScope; modules: string[] | null; includeVisual: boolean }) =>
+      sitesApi.triggerAudit(id!, scope, modules, includeVisual),
+    onSuccess: (_data, { scope, modules, includeVisual }) => {
       toast.success(
         modules && modules.length > 0
           ? `Partial audit started (${modules.length} module${modules.length === 1 ? '' : 's'}).`
           : scope === 'full'
-            ? 'Full site audit started — this can take a while, feel free to check back later.'
-            : 'Audit execution initiated!'
+            ? `Full website audit started${includeVisual ? ' with visual inspection' : ''} — this can take a while, feel free to check back later.`
+            : includeVisual
+              ? 'Audit with visual inspection started.'
+              : 'Audit started (no visual inspection).'
       )
       queryClient.invalidateQueries({ queryKey: ['site', id] })
       queryClient.invalidateQueries({ queryKey: ['site-history', id] })
@@ -139,10 +144,10 @@ export const SiteDetailPage: React.FC = () => {
     },
   })
 
-  const scopeOptions: { value: AuditScope; label: string }[] = [
-    { value: 'quick', label: 'Quick (Pages)' },
-    { value: 'with_posts', label: '+ Blog Posts' },
-    { value: 'full', label: 'Full Site (slow)' },
+  const scopeOptions: { value: AuditScope; label: string; title: string }[] = [
+    { value: 'quick', label: 'Quick', title: 'Homepage + up to 20 pages: a fast spot check' },
+    { value: 'with_posts', label: 'Pages + posts', title: 'Every WordPress Page plus the 10 most recent blog posts (what the schedules run by default)' },
+    { value: 'full', label: 'Full website', title: 'Every URL in the sitemap, up to 500. Slow.' },
   ]
 
   const allModuleNames = availableModules.map((m) => m.name)
@@ -252,8 +257,10 @@ export const SiteDetailPage: React.FC = () => {
             <span>&bull;</span>
             <span className="flex items-center gap-1">
               <Calendar className="w-3.5 h-3.5 text-slate-400" />
-              <span title={`cron: ${site.cron_schedule} (Mexico City)`}>
-                {site.is_active === false ? 'Manual only' : `Full audit ${describeCron(site.cron_schedule).replace(/^Daily/, 'daily').replace(/^Every/, 'every').replace(/^Weekdays/, 'weekdays').replace(/^Monthly/, 'monthly').replace(/^Custom/, 'custom')}`}
+              <span title={`regular: ${site.cron_schedule}${site.visual_cron_schedule ? ` · visual: ${site.visual_cron_schedule}` : ''} (Mexico City)`}>
+                {site.is_active === false
+                  ? 'Manual only'
+                  : `Audit ${lower(describeCron(site.cron_schedule))}${site.visual_cron_schedule ? `, visual ${lower(describeCron(site.visual_cron_schedule))}` : ', no visual schedule'}`}
               </span>
             </span>
             <span>&bull;</span>
@@ -313,6 +320,7 @@ export const SiteDetailPage: React.FC = () => {
                   key={opt.value}
                   type="button"
                   onClick={() => setAuditScope(opt.value)}
+                  title={opt.title}
                   className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
                     auditScope === opt.value
                       ? 'bg-white dark:bg-slate-700 text-brand-600 dark:text-brand-400 shadow-sm'
@@ -323,6 +331,23 @@ export const SiteDetailPage: React.FC = () => {
                 </button>
               ))}
             </div>
+
+            <label
+              className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border cursor-pointer transition-colors ${
+                includeVisual
+                  ? 'border-brand-300 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/40 text-brand-700 dark:text-brand-300'
+                  : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 text-slate-600 dark:text-slate-300'
+              }`}
+              title="Also take desktop + mobile screenshots of every page and review them with the vision model (slower, uses vision credits)"
+            >
+              <input
+                type="checkbox"
+                checked={includeVisual}
+                onChange={(e) => setIncludeVisual(e.target.checked)}
+                className="w-3.5 h-3.5 rounded text-brand-600 focus:ring-brand-500 border-slate-300 dark:border-slate-600"
+              />
+              Visual inspection
+            </label>
 
             <button
               type="button"
@@ -340,7 +365,7 @@ export const SiteDetailPage: React.FC = () => {
 
             <button
               type="button"
-              onClick={() => triggerMutation.mutate({ scope: auditScope, modules: selectedModules })}
+              onClick={() => triggerMutation.mutate({ scope: auditScope, modules: selectedModules, includeVisual })}
               disabled={triggerMutation.isPending || (selectedModules !== null && selectedModules.length === 0)}
               className="inline-flex items-center gap-2 px-5 py-2 text-sm font-semibold rounded-xl text-white bg-brand-600 hover:bg-brand-700 shadow-md shadow-brand-500/20 disabled:opacity-60 transition-all"
             >
@@ -582,7 +607,7 @@ export const SiteDetailPage: React.FC = () => {
               Trigger a manual audit or wait for the scheduled full audit to inspect the audit modules.
             </p>
             <button
-              onClick={() => triggerMutation.mutate({ scope: auditScope, modules: selectedModules })}
+              onClick={() => triggerMutation.mutate({ scope: auditScope, modules: selectedModules, includeVisual })}
               disabled={triggerMutation.isPending}
               className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg text-white bg-brand-600 hover:bg-brand-700"
             >

@@ -263,6 +263,7 @@ def build_report_data(site: Site | None, run: AuditRun, results: list[AuditResul
             "scope": run.scope,
             "modules": run.modules,  # None = full run; otherwise the module subset that ran
             "partial": run.modules is not None,
+            "include_visual": run.include_visual if run.include_visual is not None else True,
             "status": run.status,
             "triggered_by": run.triggered_by,
             "started_at": run.started_at.isoformat() if run.started_at else None,

@@ -10,14 +10,17 @@ import {
   Loader2,
   Info,
   Check,
-  Clock,
   ShieldCheck,
   ShieldAlert,
   PlugZap,
 } from 'lucide-react'
-import type { Site, SiteCreateInput } from '../lib/types'
+import type { ScheduleScope, Site, SiteCreateInput } from '../lib/types'
 import { sites as sitesApi } from '../lib/api'
-import { DEFAULT_SCHEDULE, WEEKDAYS, buildCron, describeCron, parseCron, type SimpleSchedule } from '../lib/cron'
+import { DEFAULT_SCHEDULE, type SimpleSchedule } from '../lib/cron'
+import SchedulePicker from './SchedulePicker'
+
+const WEEKLY_MONDAY: SimpleSchedule = { ...DEFAULT_SCHEDULE, kind: 'weekly', dow: 1 }
+const MONTHLY_FIRST: SimpleSchedule = { ...DEFAULT_SCHEDULE, kind: 'monthly', dom: 1 }
 
 interface SiteFormProps {
   initialValues?: Partial<Site>
@@ -38,7 +41,13 @@ export const SiteForm: React.FC<SiteFormProps> = ({
 
   const [name, setName] = useState(initialValues?.name || '')
   const [url, setUrl] = useState(initialValues?.url || '')
-  const [cronSchedule, setCronSchedule] = useState(initialValues?.cron_schedule || '0 6 * * *')
+  const [cronSchedule, setCronSchedule] = useState(initialValues?.cron_schedule || '0 6 * * 1')
+  const [cronScope, setCronScope] = useState<ScheduleScope>(initialValues?.cron_scope || 'with_posts')
+  // Visual schedule: '' means off. Keep the last expression while off so re-enabling restores it.
+  const isNew = !initialValues?.id
+  const [visualCron, setVisualCron] = useState(initialValues?.visual_cron_schedule || '0 6 1 * *')
+  const [visualEnabled, setVisualEnabled] = useState(isNew ? true : !!initialValues?.visual_cron_schedule)
+  const [visualScope, setVisualScope] = useState<ScheduleScope>(initialValues?.visual_cron_scope || 'with_posts')
   const [notificationEmail, setNotificationEmail] = useState(initialValues?.notify_email || '')
   const [isActive, setIsActive] = useState(initialValues?.is_active !== false)
 
@@ -73,22 +82,6 @@ export const SiteForm: React.FC<SiteFormProps> = ({
   const [napPhone, setNapPhone] = useState(initialValues?.nap_phone || '')
   const [scProperty, setScProperty] = useState(initialValues?.search_console_property || '')
 
-  const [showRawCron, setShowRawCron] = useState(false)
-  const simpleSchedule = parseCron(cronSchedule)
-  const scheduleBase: SimpleSchedule = simpleSchedule ?? DEFAULT_SCHEDULE
-  const setSchedule = (patch: Partial<SimpleSchedule>) => {
-    setCronSchedule(buildCron({ ...scheduleBase, ...patch }))
-    setIsActive(true)
-  }
-  const chipClass = (active: boolean) =>
-    `text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-      active
-        ? 'bg-brand-50 dark:bg-brand-950/60 border-brand-500 text-brand-600 dark:text-brand-400 font-semibold'
-        : 'border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400'
-    }`
-  const isKind = (kind: SimpleSchedule['kind'], dow?: number) =>
-    isActive && !!simpleSchedule && simpleSchedule.kind === kind && (dow === undefined || simpleSchedule.dow === dow)
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
@@ -101,6 +94,9 @@ export const SiteForm: React.FC<SiteFormProps> = ({
       name: name.trim(),
       url: normalizedUrl,
       cron_schedule: cronSchedule.trim(),
+      cron_scope: cronScope,
+      visual_cron_schedule: visualEnabled ? visualCron.trim() : '',
+      visual_cron_scope: visualScope,
       notify_email: notificationEmail.trim() || null,
       is_active: isActive,
       wp_username: wpUsername.trim() || null,
@@ -169,113 +165,43 @@ export const SiteForm: React.FC<SiteFormProps> = ({
             </div>
           </div>
 
-          {/* Schedule */}
-          <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
-              Audit Schedule{' '}
+          {/* Schedules */}
+          <div className="space-y-3">
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300">
+              Audit Schedules{' '}
               <span className="normal-case font-normal text-slate-400">(Mexico City time)</span>
             </label>
-
-            <div className="flex flex-wrap gap-2">
-              <button type="button" onClick={() => setSchedule({ kind: 'daily' })} className={chipClass(isKind('daily'))}>
-                Every day
-              </button>
-              {WEEKDAYS.map((w) => (
-                <button
-                  key={w.value}
-                  type="button"
-                  onClick={() => setSchedule({ kind: 'weekly', dow: w.value })}
-                  className={chipClass(isKind('weekly', w.value))}
-                  title={`Every ${w.label}`}
-                >
-                  {w.short}
-                </button>
-              ))}
-              <button type="button" onClick={() => setSchedule({ kind: 'weekdays' })} className={chipClass(isKind('weekdays'))}>
-                Weekdays
-              </button>
-              <button type="button" onClick={() => setSchedule({ kind: 'monthly', dom: 1 })} className={chipClass(isKind('monthly'))}>
-                1st of month
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsActive(false)}
-                className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                  !isActive
-                    ? 'bg-slate-200 dark:bg-slate-700 border-slate-400 dark:border-slate-500 text-slate-700 dark:text-slate-200 font-semibold'
-                    : 'border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400'
-                }`}
-              >
-                Manual only
-              </button>
-            </div>
-
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-2">
-                <Clock className="w-4 h-4 text-slate-400" />
-                <span className="text-xs text-slate-500">at</span>
-                <select
-                  value={scheduleBase.hour}
-                  disabled={!isActive || !simpleSchedule}
-                  onChange={(e) => setSchedule({ hour: Number(e.target.value) })}
-                  className="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50"
-                >
-                  {Array.from({ length: 24 }, (_, h) => (
-                    <option key={h} value={h}>
-                      {h % 12 === 0 ? 12 : h % 12} {h < 12 ? 'AM' : 'PM'}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={scheduleBase.minute}
-                  disabled={!isActive || !simpleSchedule}
-                  onChange={(e) => setSchedule({ minute: Number(e.target.value) })}
-                  className="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50"
-                >
-                  {[0, 15, 30, 45].map((m) => (
-                    <option key={m} value={m}>
-                      :{String(m).padStart(2, '0')}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {isActive && (
-                <span className="text-sm font-medium text-slate-800 dark:text-slate-200">
-                  {describeCron(cronSchedule)}
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => setShowRawCron((v) => !v)}
-                className="ml-auto text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 underline-offset-2 hover:underline"
-              >
-                {showRawCron ? 'Hide cron expression' : 'Edit cron expression'}
-              </button>
-            </div>
-
-            {(showRawCron || (isActive && !simpleSchedule)) && (
-              <div className="mt-2">
-                <input
-                  id="cronSchedule"
-                  type="text"
-                  required={isActive}
-                  disabled={!isActive}
-                  value={cronSchedule}
-                  onChange={(e) => setCronSchedule(e.target.value)}
-                  placeholder="0 6 * * 1"
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                />
-                <p className="text-xs text-slate-400 mt-1">
-                  Five fields: minute hour day-of-month month day-of-week (0 = Sunday). Expressions outside the presets are kept as typed.
-                </p>
-              </div>
+            <SchedulePicker
+              title="Regular audit"
+              description="Performance, SEO, security, WordPress health, links, forms, tracking and Search Console. No screenshots. Weekly is the usual cadence."
+              cron={cronSchedule}
+              onCronChange={setCronSchedule}
+              enabled={isActive}
+              onEnabledChange={setIsActive}
+              scope={cronScope}
+              onScopeChange={setCronScope}
+              fallback={WEEKLY_MONDAY}
+            />
+            <SchedulePicker
+              title="Visual inspection audit"
+              description="Everything the regular audit does, plus desktop and mobile screenshots of every page reviewed section by section by the vision model. Slower and uses vision credits; monthly is the usual cadence."
+              cron={visualCron}
+              onCronChange={setVisualCron}
+              enabled={isActive && visualEnabled}
+              onEnabledChange={(on) => {
+                setVisualEnabled(on)
+                if (on) setIsActive(true)
+              }}
+              scope={visualScope}
+              onScopeChange={setVisualScope}
+              fallback={MONTHLY_FIRST}
+              scopeNote="Screenshots always cover the pages plus one recent blog post, whatever the scope."
+            />
+            {!isActive && (
+              <p className="text-xs text-slate-400">
+                Automated audits are off for this site; both schedules are paused and audits only run when triggered manually.
+              </p>
             )}
-
-            <p className="text-xs text-slate-400 mt-2">
-              {isActive
-                ? 'Scheduled audits always run the full scope: every page and post in the sitemap (up to 500 URLs), Lighthouse on up to 60 of them, plus WordPress, security, SEO and Search Console checks. Sites sharing a slot run one after another.'
-                : 'Automated scheduled audits are off for this site — audits only run when triggered manually.'}
-            </p>
           </div>
 
           {/* Notification Email Override */}

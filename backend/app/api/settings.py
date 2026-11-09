@@ -14,7 +14,7 @@ from app.database import get_db
 from app.auditors import google_sc
 from app.email.resend_client import send_test_email
 from app.models import AppSetting, Site, User
-from app.scheduler import SCHEDULED_SCOPE, dispatch_audit, scheduler
+from app.scheduler import DEFAULT_SCHEDULED_SCOPE, dispatch_audit, scheduler
 from app.uptime import run_uptime_probe
 
 logger = logging.getLogger(__name__)
@@ -192,36 +192,50 @@ def get_scheduled_jobs(db: Session = Depends(get_db)):
     sites = {str(s.id): s for s in db.query(Site).all()}
     jobs = []
     for j in scheduler.get_jobs():
-        site = sites.get(j.id.removeprefix("audit_site_")) if j.id.startswith("audit_site_") else None
+        kind = "visual" if j.id.startswith("visual_site_") else "regular" if j.id.startswith("audit_site_") else None
+        site = sites.get(j.id.split("_site_", 1)[1]) if kind else None
         next_run = j.next_run_time
+        if site and kind == "visual":
+            scope, cron = site.visual_cron_scope or DEFAULT_SCHEDULED_SCOPE, site.visual_cron_schedule
+        elif site:
+            scope, cron = site.cron_scope or DEFAULT_SCHEDULED_SCOPE, site.cron_schedule
+        else:
+            scope, cron = None, None
         jobs.append({
             "id": j.id,
             "name": j.name,
+            "kind": kind if site else None,
             "site_id": str(site.id) if site else None,
             "site_name": site.name if site else None,
-            "scope": SCHEDULED_SCOPE if site else None,
-            "cron_expression": site.cron_schedule if site else str(j.trigger),
+            "scope": scope,
+            "cron_expression": cron if site else str(j.trigger),
             "next_run_time": next_run.astimezone(timezone.utc).replace(tzinfo=None).isoformat() if next_run else None,
             "is_paused": next_run is None,
         })
-    jobs.sort(key=lambda x: (x["site_name"] is None, x["next_run_time"] or "9"))
+    jobs.sort(key=lambda x: (x["site_name"] is None, x["site_name"] or "", x["kind"] == "visual", x["next_run_time"] or "9"))
     return jobs
 
 
 @router.post("/scheduler/run-all")
 def run_all_audits(
+    visual: bool = False,
     db: Session = Depends(get_db),
 ):
-    """Queue a full-scope audit for every active site, the same run the cron schedule performs.
-    Runs execute one at a time through the shared audit queue (previously they all started
-    simultaneously and corrupted each other's results)."""
+    """Queue, for every active site, the run its schedule would perform: the regular audit
+    (every module but visual, at the site's regular scope) or, with ?visual=true, the visual
+    audit (everything, at the site's visual scope). Runs execute one at a time through the
+    shared audit queue (previously they all started simultaneously and corrupted each other's
+    results)."""
     active_sites = db.query(Site).filter(Site.is_active == True).all()
     for site in active_sites:
-        dispatch_audit(str(site.id), "manual", SCHEDULED_SCOPE)
+        scope = (site.visual_cron_scope if visual else site.cron_scope) or DEFAULT_SCHEDULED_SCOPE
+        dispatch_audit(str(site.id), "manual", scope, include_visual=visual)
 
+    kind = "visual" if visual else "regular"
     return {
-        "message": f"Queued full audits for {len(active_sites)} active sites (they run one at a time)",
+        "message": f"Queued {kind} audits for {len(active_sites)} active sites (they run one at a time)",
         "count": len(active_sites),
+        "kind": kind,
     }
 
 

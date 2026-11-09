@@ -122,7 +122,7 @@ export const SettingsPage: React.FC = () => {
 
   // Run All Audits Mutation
   const runAllMutation = useMutation({
-    mutationFn: () => settingsApi.runAll(),
+    mutationFn: (visual: boolean) => settingsApi.runAll(visual),
     onSuccess: (data) => {
       toast.success(data.message || 'Audits triggered for all sites')
       queryClient.invalidateQueries({ queryKey: ['sites'] })
@@ -627,8 +627,9 @@ export const SettingsPage: React.FC = () => {
           </button>
           <button
             type="button"
-            onClick={() => runAllMutation.mutate()}
+            onClick={() => runAllMutation.mutate(false)}
             disabled={runAllMutation.isPending}
+            title="Queue each active site's regular audit now (every module except the visual inspection, at the site's scope)"
             className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-xl text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-all disabled:opacity-60"
           >
             {runAllMutation.isPending ? (
@@ -636,7 +637,17 @@ export const SettingsPage: React.FC = () => {
             ) : (
               <Play className="w-3.5 h-3.5 fill-current" />
             )}
-            Run Full Audits on All Sites
+            Run Regular Audits on All Sites
+          </button>
+          <button
+            type="button"
+            onClick={() => runAllMutation.mutate(true)}
+            disabled={runAllMutation.isPending}
+            title="Queue each active site's visual audit now (everything incl. screenshots and vision review; slow, uses vision credits)"
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-xl border border-emerald-600 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 transition-all disabled:opacity-60"
+          >
+            <Play className="w-3.5 h-3.5 fill-current" />
+            Run Visual Audits on All Sites
           </button>
           </div>
         </div>
@@ -665,7 +676,9 @@ export const SettingsPage: React.FC = () => {
                 {jobsList.map((job) => (
                   <tr key={job.id} className="hover:bg-slate-50 dark:hover:bg-slate-750">
                     <td className="py-3 px-3 font-semibold text-slate-800 dark:text-slate-200">
-                      {job.site_id ? `Full audit${job.scope && job.scope !== 'full' ? ` (${job.scope})` : ''}` : job.name || job.id}
+                      {job.site_id
+                        ? `${job.kind === 'visual' ? 'Visual audit' : 'Regular audit'} · ${job.scope === 'full' ? 'full website' : 'pages + recent posts'}`
+                        : job.name || job.id}
                     </td>
                     <td className="py-3 px-3 text-slate-600 dark:text-slate-400">
                       {job.site_name || job.site_id || 'System Job'}
