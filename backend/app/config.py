@@ -24,10 +24,13 @@ class Settings(BaseSettings):
     RESEND_FROM_EMAIL: str = "audits@yourdomain.com"
     RESEND_FROM_NAME: str = "WP Auditor"
     ALERT_EMAIL: str = ""
-    # Visual inspection: pages captured per run (desktop + mobile) and how many of them get the
-    # paid section-by-section vision review (~$0.03 per page with gpt-4o).
+    # Visual inspection: pages captured per run (desktop + mobile), how many of them get the paid
+    # section-by-section vision review, and which model judges them. A "gemini-*" model uses the
+    # Gemini key (~$0.01 per page with gemini-3.5-flash-lite), anything else the OpenAI key
+    # (~$0.04 per page with gpt-4o). Tested 2026-11: gemini-3.5-flash-lite matched gpt-4o exactly.
     VISUAL_MAX_PAGES: int = 60
     VISUAL_VISION_PAGE_BUDGET: int = 25
+    VISION_MODEL: str = "gemini-3.5-flash-lite"
     FRONTEND_URL: str = "http://localhost:3000"
     DEBUG: bool = False
 

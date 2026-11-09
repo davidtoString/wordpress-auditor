@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import timezone
 from typing import Any, List, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
@@ -17,6 +18,16 @@ from app.scheduler import SCHEDULED_SCOPE, dispatch_audit, scheduler
 from app.uptime import run_uptime_probe
 
 logger = logging.getLogger(__name__)
+
+# Vision models offered in the UI, cheapest first. Verified on Shipton's broken pages 2026-11-09:
+# gemini-3.5-flash-lite and gpt-4o found every defect; gpt-4.1-mini one false flag; the rest missed
+# defects or over-flagged. Free text is still accepted for new model ids.
+VISION_MODEL_OPTIONS = [
+    {"id": "gemini-3.5-flash-lite", "label": "Gemini 3.5 Flash-Lite (recommended, ~$0.01/page)", "provider": "gemini"},
+    {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash (~$0.03/page)", "provider": "gemini"},
+    {"id": "gpt-4.1-mini", "label": "GPT-4.1 mini (~$0.03/page)", "provider": "openai"},
+    {"id": "gpt-4o", "label": "GPT-4o (~$0.04/page)", "provider": "openai"},
+]
 
 router = APIRouter(prefix="/settings", tags=["settings"], dependencies=[Depends(require_admin)])
 
@@ -42,6 +53,7 @@ class SettingsUpdate(BaseModel):
     OPENAI_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
     AI_PROVIDER: Optional[str] = None
+    VISION_MODEL: Optional[str] = None
     GOOGLE_PAGESPEED_API_KEY: Optional[str] = None
     GOOGLE_SERVICE_ACCOUNT_JSON: Optional[str] = None
     RESEND_API_KEY: Optional[str] = None
@@ -69,6 +81,8 @@ def get_settings():
     """Retrieve current system settings with sensitive API keys masked."""
     return {
         "AI_PROVIDER": settings.AI_PROVIDER,
+        "VISION_MODEL": settings.VISION_MODEL,
+        "VISION_MODEL_OPTIONS": VISION_MODEL_OPTIONS,
         "OPENAI_API_KEY": _mask_secret(settings.OPENAI_API_KEY),
         "GEMINI_API_KEY": _mask_secret(settings.GEMINI_API_KEY),
         "GOOGLE_PAGESPEED_API_KEY": _mask_secret(settings.GOOGLE_PAGESPEED_API_KEY),
@@ -111,6 +125,11 @@ def update_settings(payload: SettingsUpdate, db: Session = Depends(get_db)):
         _set_and_persist(db, "GEMINI_API_KEY", payload.GEMINI_API_KEY.strip())
     if payload.AI_PROVIDER is not None:
         _set_and_persist(db, "AI_PROVIDER", payload.AI_PROVIDER.strip().lower())
+    if payload.VISION_MODEL is not None:
+        model = payload.VISION_MODEL.strip()
+        if model and not re.fullmatch(r"[A-Za-z0-9.\-]{3,60}", model):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Vision model must be a model id such as gemini-3.5-flash-lite or gpt-4o.")
+        _set_and_persist(db, "VISION_MODEL", model)
     if payload.GOOGLE_PAGESPEED_API_KEY is not None:
         _set_and_persist(db, "GOOGLE_PAGESPEED_API_KEY", payload.GOOGLE_PAGESPEED_API_KEY.strip())
     if payload.GOOGLE_SERVICE_ACCOUNT_JSON is not None:

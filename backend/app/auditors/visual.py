@@ -47,7 +47,9 @@ TILE_HEIGHT = {"desktop": 1400, "mobile": 2000}
 TILE_SCALE = {"desktop": 0.6, "mobile": 1.0}   # desktop tiles sent at 820px wide; mobile at 390px
 MONTAGE_COLUMNS = {"desktop": 1, "mobile": 2}  # two mobile strips per request, side by side
 MIN_TILE_HEIGHT = 250
-VISION_MODEL = "gpt-4o"
+DEFAULT_VISION_MODEL = "gemini-3.5-flash-lite"   # matched gpt-4o verdict-for-verdict at ~1/5 the cost
+OPENAI_FALLBACK_MODEL = "gpt-4o"                 # used when no Gemini key is configured
+VISION_TIMEOUT_S = 60                            # per tile; a hung call must never stall the audit
 BROKEN_CONFIDENCE = 0.7
 
 _VISION_PROMPT = (
@@ -84,7 +86,8 @@ _DISMISS_SELECTORS = [
 _NOISE_RE = re.compile(
     r"(cut ?off|cropped|truncated|clipped)\b.*\b(top|bottom|edge)|\b(top|bottom|edge)\b.*(cut ?off|cropped|truncated|clipped)"
     r"|lacks? (a |proper )?spac|missing (a )?space|spacing|typo|punctuation|hyphen|spell|grammar|capitali[sz]"
-    r"|recaptcha|chat (widget|bubble)|cookie",
+    r"|recaptcha|chat (widget|bubble)|cookie"
+    r"|future date|date .*(in the )?future|\b20[2-9][0-9]\b.*(incorrect|wrong|invalid) date",
     re.IGNORECASE,
 )
 
@@ -312,16 +315,60 @@ def _tiles(path: Path, viewport: str) -> list[tuple[int, int, bytes]]:
     return out
 
 
-async def _judge_tile(client, page_url: str, viewport: str, idx: int, total: int, jpeg: bytes) -> dict[str, Any] | None:
-    b64 = base64.b64encode(jpeg).decode("ascii")
-    try:
-        completion = await client.chat.completions.create(
-            model=VISION_MODEL, temperature=0, max_tokens=600, response_format={"type": "json_object"},
+class VisionClient:
+    """One configured vision backend: Gemini (default, cheapest with equal accuracy in our tests)
+    or OpenAI. The model is chosen from settings.VISION_MODEL; a model whose key is missing
+    falls back to whichever provider has a key."""
+
+    def __init__(self, provider: str, model: str):
+        self.provider, self.model = provider, model
+        self._openai = None
+        if provider == "openai":
+            from openai import AsyncOpenAI
+            self._openai = AsyncOpenAI(api_key=settings.OPENAI_API_KEY, timeout=VISION_TIMEOUT_S, max_retries=1)
+
+    @classmethod
+    def from_settings(cls) -> "VisionClient | None":
+        wanted = (getattr(settings, "VISION_MODEL", "") or DEFAULT_VISION_MODEL).strip()
+        gem, oai = bool(settings.GEMINI_API_KEY), bool(settings.OPENAI_API_KEY)
+        if wanted.startswith("gemini"):
+            if gem:
+                return cls("gemini", wanted)
+            if oai:
+                return cls("openai", OPENAI_FALLBACK_MODEL)
+            return None
+        if oai:
+            return cls("openai", wanted)
+        if gem:
+            return cls("gemini", DEFAULT_VISION_MODEL)
+        return None
+
+    async def judge(self, system: str, text: str, jpeg: bytes) -> dict[str, Any]:
+        if self.provider == "gemini":
+            return await asyncio.wait_for(asyncio.to_thread(self._gemini, system, text, jpeg), timeout=VISION_TIMEOUT_S + 15)
+        return await asyncio.wait_for(self._openai_call(system, text, jpeg), timeout=VISION_TIMEOUT_S + 15)
+
+    def _gemini(self, system: str, text: str, jpeg: bytes) -> dict[str, Any]:
+        import google.generativeai as genai
+        genai.configure(api_key=settings.GEMINI_API_KEY, transport="rest")  # gRPC retries hang for minutes on auth errors
+        model = genai.GenerativeModel(
+            self.model, system_instruction=system,
+            generation_config={"temperature": 0, "response_mime_type": "application/json", "max_output_tokens": 1200},
+        )
+        r = model.generate_content([text, {"mime_type": "image/jpeg", "data": jpeg}], request_options={"timeout": VISION_TIMEOUT_S})
+        verdict = json.loads(r.text or "{}")
+        um = getattr(r, "usage_metadata", None)
+        verdict["_tokens"] = ((um.prompt_token_count or 0) + (um.candidates_token_count or 0)) if um else None
+        return verdict
+
+    async def _openai_call(self, system: str, text: str, jpeg: bytes) -> dict[str, Any]:
+        b64 = base64.b64encode(jpeg).decode("ascii")
+        completion = await self._openai.chat.completions.create(
+            model=self.model, temperature=0, max_tokens=600, response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": _VISION_PROMPT},
+                {"role": "system", "content": system},
                 {"role": "user", "content": [
-                    {"type": "text", "text": f"Page: {page_url}. Viewport: {viewport}. Section {idx + 1} of {total}."
-                                              + (" The image shows two consecutive strips of the page side by side: read the left strip first, then the right one; the right strip continues directly below the left." if viewport == "mobile" and MONTAGE_COLUMNS.get("mobile", 1) == 2 else "")},
+                    {"type": "text", "text": text},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}},
                 ]},
             ],
@@ -330,12 +377,20 @@ async def _judge_tile(client, page_url: str, viewport: str, idx: int, total: int
         usage = getattr(completion, "usage", None)
         verdict["_tokens"] = (usage.prompt_tokens + usage.completion_tokens) if usage else None
         return verdict
+
+
+async def _judge_tile(client: VisionClient, page_url: str, viewport: str, idx: int, total: int, jpeg: bytes) -> dict[str, Any] | None:
+    text = (f"Page: {page_url}. Viewport: {viewport}. Section {idx + 1} of {total}."
+            + (" The image shows two consecutive strips of the page side by side: read the left strip first, then the right one; the right strip continues directly below the left."
+               if viewport == "mobile" and MONTAGE_COLUMNS.get("mobile", 1) == 2 else ""))
+    try:
+        return await client.judge(_VISION_PROMPT, text, jpeg)
     except Exception as exc:
-        logger.warning("vision check failed for %s %s #%d: %s", page_url, viewport, idx, exc)
+        logger.warning("vision check failed for %s %s #%d (%s): %s", page_url, viewport, idx, client.model, str(exc)[:200])
         return None
 
 
-async def review_page(client, page: dict[str, Any], site_url: str, out_dir: Path, rel_dir: Path) -> dict[str, Any]:
+async def review_page(client: VisionClient, page: dict[str, Any], site_url: str, out_dir: Path, rel_dir: Path) -> dict[str, Any]:
     """Judge every section of both viewports. Returns the page verdict with flagged sections
     saved as images for the UI."""
     issues: list[dict[str, Any]] = []
@@ -385,7 +440,7 @@ async def review_page(client, page: dict[str, Any], site_url: str, out_dir: Path
         summary = f"All {sections_total} sections reviewed, nothing looked broken."
     return {
         "broken": broken, "confidence": max(confidences) if confidences else (0.9 if sections_total else 0.0),
-        "issues": issues, "summary": summary, "model": VISION_MODEL,
+        "issues": issues, "summary": summary, "model": client.model,
         "sections_reviewed": sections_total, "sections_broken": sections_broken, "tokens": tokens,
         "reviewed_at": _now_iso(),
     }
@@ -494,9 +549,9 @@ async def run_visual_check(site_url: str, target_paths: list[str] | None,
     reviewed = 0
     broken_pages: list[str] = []
     tokens_total = 0
-    if settings.OPENAI_API_KEY and budget > 0:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    client = VisionClient.from_settings()
+    if client and budget > 0:
+        logger.info("Visual review with %s (%s), budget %d pages", client.model, client.provider, budget)
         to_review = _select_for_review(pages, state, budget)
         page_sem = asyncio.Semaphore(2)
 
@@ -531,9 +586,9 @@ async def run_visual_check(site_url: str, target_paths: list[str] | None,
     else:
         bits.append("no previous screenshots to compare yet")
     if reviewed:
-        bits.append(f"{reviewed} reviewed section by section by the vision model, {len(broken_pages)} judged broken")
-    elif not settings.OPENAI_API_KEY:
-        bits.append("vision review skipped (no OpenAI key configured)")
+        bits.append(f"{reviewed} reviewed section by section by {client.model}, {len(broken_pages)} judged broken")
+    elif client is None:
+        bits.append("vision review skipped (no Gemini or OpenAI key configured)")
     elif budget <= 0:
         bits.append("vision review disabled (budget 0)")
     if blocked:

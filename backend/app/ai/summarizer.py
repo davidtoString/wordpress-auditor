@@ -114,9 +114,9 @@ async def generate_audit_summary(site_url: str, results: List[Dict[str, Any]]) -
         if settings.GEMINI_API_KEY:
             try:
                 import google.generativeai as genai
-                genai.configure(api_key=settings.GEMINI_API_KEY)
-                model = genai.GenerativeModel("gemini-1.5-pro")
-                response = await model.generate_content_async(prompt)
+                genai.configure(api_key=settings.GEMINI_API_KEY, transport="rest")
+                model = genai.GenerativeModel("gemini-3.5-flash")  # 1.5 models were retired by Google
+                response = await model.generate_content_async(prompt, request_options={"timeout": 90})
                 if response and response.text:
                     return response.text.strip()
             except Exception as exc:
@@ -163,9 +163,9 @@ async def generate_brief_narrative(site_url: str, brief_markdown: str) -> str | 
     if (provider == "gemini" or (not provider and settings.GEMINI_API_KEY)) and settings.GEMINI_API_KEY:
         try:
             import google.generativeai as genai
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            response = await model.generate_content_async(prompt)
+            genai.configure(api_key=settings.GEMINI_API_KEY, transport="rest")
+            model = genai.GenerativeModel("gemini-3.5-flash-lite")  # 1.5 models were retired by Google
+            response = await model.generate_content_async(prompt, request_options={"timeout": 60})
             if response and response.text:
                 return response.text.strip()
         except Exception as exc:

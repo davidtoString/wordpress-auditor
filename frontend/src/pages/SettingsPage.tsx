@@ -43,6 +43,7 @@ export const SettingsPage: React.FC = () => {
   const [openaiKey, setOpenaiKey] = useState('')
   const [geminiKey, setGeminiKey] = useState('')
   const [aiProvider, setAiProvider] = useState<'openai' | 'gemini'>('openai')
+  const [visionModel, setVisionModel] = useState('')
   const [pagespeedKey, setPagespeedKey] = useState('')
   const [resendKey, setResendKey] = useState('')
   const [googleJson, setGoogleJson] = useState('')
@@ -62,6 +63,7 @@ export const SettingsPage: React.FC = () => {
   useEffect(() => {
     if (settingsData) {
       setAiProvider(settingsData.AI_PROVIDER || 'openai')
+      setVisionModel(settingsData.VISION_MODEL || '')
       setResendFromEmail(settingsData.RESEND_FROM_EMAIL || '')
       setResendFromName(settingsData.RESEND_FROM_NAME || '')
       setAlertEmail(settingsData.ALERT_EMAIL || '')
@@ -135,6 +137,7 @@ export const SettingsPage: React.FC = () => {
     e.preventDefault()
     const payload: Partial<Settings> = {
       AI_PROVIDER: aiProvider,
+      VISION_MODEL: visionModel.trim(),
       RESEND_FROM_EMAIL: resendFromEmail.trim(),
       RESEND_FROM_NAME: resendFromName.trim(),
       ALERT_EMAIL: alertEmail.trim(),
@@ -202,7 +205,7 @@ export const SettingsPage: React.FC = () => {
                 }`}
               >
                 <div className="font-semibold text-sm">OpenAI</div>
-                <div className="text-xs opacity-75">GPT-4o Reasoning</div>
+                <div className="text-xs opacity-75">GPT-4o / GPT-4o mini</div>
               </button>
 
               <button
@@ -215,9 +218,46 @@ export const SettingsPage: React.FC = () => {
                 }`}
               >
                 <div className="font-semibold text-sm">Google Gemini</div>
-                <div className="text-xs opacity-75">Gemini 1.5 Flash / Pro</div>
+                <div className="text-xs opacity-75">Gemini 3.5 Flash / Flash-Lite</div>
               </button>
             </div>
+            <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
+              Used for the written brief narrative. The visual inspection picks its own model below.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+              Visual inspection model
+            </label>
+            <div className="flex flex-wrap items-center gap-3 max-w-xl">
+              <select
+                value={(settingsData?.VISION_MODEL_OPTIONS || []).some((o) => o.id === visionModel) ? visionModel : '__custom'}
+                onChange={(e) => setVisionModel(e.target.value === '__custom' ? '' : e.target.value)}
+                className="px-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100"
+              >
+                {(settingsData?.VISION_MODEL_OPTIONS || []).map((o) => (
+                  <option key={o.id} value={o.id}>{o.label}</option>
+                ))}
+                <option value="__custom">Other model id…</option>
+              </select>
+              {!(settingsData?.VISION_MODEL_OPTIONS || []).some((o) => o.id === visionModel) && (
+                <input
+                  type="text"
+                  value={visionModel}
+                  onChange={(e) => setVisionModel(e.target.value)}
+                  placeholder="e.g. gemini-3.5-flash-lite"
+                  className="px-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 w-64"
+                />
+              )}
+            </div>
+            <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
+              Judges every screenshot section for broken layouts. A Gemini model needs the Gemini key, others the OpenAI key; if that key
+              is missing the other provider is used automatically. Gemini 3.5 Flash-Lite found the same defects as GPT-4o in testing at about a fifth of the cost.
+              {visionModel.startsWith('gemini') && settingsData && !settingsData.gemini_configured && (
+                <span className="text-amber-600 dark:text-amber-400"> No Gemini key is saved, so GPT-4o will be used until one is added.</span>
+              )}
+            </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">

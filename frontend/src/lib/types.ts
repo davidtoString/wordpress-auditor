@@ -232,6 +232,9 @@ export interface Settings {
   OPENAI_API_KEY?: string
   GEMINI_API_KEY?: string
   AI_PROVIDER?: 'openai' | 'gemini'
+  /** Model that judges the visual-inspection screenshots; "gemini-*" uses the Gemini key, anything else OpenAI. */
+  VISION_MODEL?: string
+  VISION_MODEL_OPTIONS?: { id: string; label: string; provider: 'openai' | 'gemini' }[]
   GOOGLE_PAGESPEED_API_KEY?: string
   /** Full service-account JSON key; GET never returns it, only the *_configured flags and e-mail. */
   GOOGLE_SERVICE_ACCOUNT_JSON?: string
