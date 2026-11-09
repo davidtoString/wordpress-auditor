@@ -342,12 +342,14 @@ def _dispatch_from_thread(site_id_str: str, kind: str = "regular") -> None:
 
 
 def schedule_weekly_digest() -> None:
-    """Monday 07:00 (app timezone): one email summarising every site's open findings. The
-    per-run email only goes out when something is new or changed, so this is the heartbeat."""
+    """Monday 12:00 (app timezone): one email summarising every site's open findings. The
+    per-run email only goes out when something is new or changed, so this is the heartbeat.
+    Noon leaves room for the default Monday 06:00 regular audits (sequential, ~25 min each)
+    to finish first, so the digest reflects this week's runs rather than last week's."""
     try:
         scheduler.add_job(
             func=_trigger_weekly_digest,
-            trigger=CronTrigger(day_of_week="mon", hour=7, minute=0, timezone=APP_TIMEZONE),
+            trigger=CronTrigger(day_of_week="mon", hour=12, minute=0, timezone=APP_TIMEZONE),
             id="weekly_digest", replace_existing=True, name="Weekly findings digest",
             misfire_grace_time=3600 * 6, coalesce=True,
         )
