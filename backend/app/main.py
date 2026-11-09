@@ -40,6 +40,8 @@ logging.basicConfig(
     level=logging.INFO if not settings.DEBUG else logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+# httpx logs every request URL at INFO, including query-string API keys (PageSpeed).
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("wp_auditor")
 console = Console()
 
